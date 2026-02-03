@@ -1,0 +1,44 @@
+[package]
+name = "velocity"
+version = "0.2.0"
+edition = "2021"
+authors = ["Hacı Mert Gökhan"]
+license = "MIT"
+description = "High-performance embedded key-value database with LSM-Tree architecture, Bloom filters, and intelligent caching"
+repository = "https://github.com/hacimertgokhan/velocity"
+keywords = ["database", "key-value", "lsm-tree", "embedded", "storage"]
+categories = ["database", "data-structures"]
+readme = "README.md"
+
+[dependencies]
+# Serde için JSON desteği
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+criterion = "0.5"  # Benchmarking
+tempfile = "3.8"   # Geçici dosyalar için
+
+[features]
+default = []
+
+[lib]
+name = "velocity"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
+[profile.dev]
+opt-level = 0
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
