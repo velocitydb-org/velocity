@@ -1,0 +1,82 @@
+# VelocityDB Configuration File
+
+[server]
+# Server binding address and port
+bind_address = "127.0.0.1:5432"
+
+# Maximum number of concurrent connections
+max_connections = 1000
+
+# Rate limiting: maximum commands per second per connection
+rate_limit_per_second = 1000
+
+# Connection timeout in seconds
+connection_timeout_seconds = 300
+
+# Enable TLS encryption (requires cert_path and key_path)
+enable_tls = false
+
+# TLS certificate and key paths (only needed if enable_tls = true)
+# cert_path = "/path/to/server.crt"
+# key_path = "/path/to/server.key"
+
+[database]
+# Maximum number of entries in memtable before flush
+max_memtable_size = 10000
+
+# Cache size (number of entries to keep in memory)
+cache_size = 5000
+
+# Bloom filter false positive rate (lower = more memory, better performance)
+bloom_false_positive_rate = 0.001
+
+# Number of SSTables before triggering compaction
+compaction_threshold = 8
+
+# Enable compression for SSTable files
+enable_compression = false
+
+[users]
+# User accounts with Argon2id password hashes
+# Use: cargo run -- create-user --username <name> --password <pass>
+# to generate password hashes
+
+# Default admin user (password: "admin123")
+admin = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$hash_placeholder"
+
+# Example users (replace with real hashes)
+# alice = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$hash_placeholder"
+# bob = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$hash_placeholder"
+
+[logging]
+# Log level: error, warn, info, debug, trace
+level = "info"
+
+# Log to file (optional)
+# file = "/var/log/velocitydb.log"
+
+[performance]
+# Enable performance metrics collection
+enable_metrics = true
+
+# Metrics collection interval in seconds
+metrics_interval = 60
+
+# Enable adaptive cache sizing
+adaptive_cache = true
+
+# Target cache hit rate for adaptive sizing
+target_cache_hit_rate = 0.85
+
+[security]
+# Enable audit logging
+audit_logging = true
+
+# Audit log file path
+audit_log_path = "./velocitydb_audit.log"
+
+# Maximum failed authentication attempts before temporary ban
+max_auth_failures = 5
+
+# Temporary ban duration in seconds
+auth_ban_duration = 300

@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  velocitydb:
+    build: .
+    container_name: velocitydb
+    ports:
+      - "5432:5432"
+    volumes:
+      - velocitydb_data:/var/lib/velocitydb
+      - ./velocity.toml:/etc/velocitydb/velocity.toml:ro
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/velocitydb", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Load balancer (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: velocitydb-lb
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - velocitydb
+    restart: unless-stopped
+
+  # Monitoring (optional)
+  prometheus:
+    image: prom/prometheus
+    container_name: velocitydb-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    container_name: velocitydb-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    restart: unless-stopped
+
+volumes:
+  velocitydb_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: velocitydb-network

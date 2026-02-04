@@ -1,320 +1,251 @@
-// examples/usage_examples.rs
+use std::path::PathBuf;
+use clap::{Parser, Subcommand};
+use tokio;
+use env_logger;
 
 use velocity::{Velocity, VelocityConfig};
+use velocity::server::{VelocityServer, ServerConfig, hash_password};
 
-/// ==================== BASIC USAGE ====================
-fn basic_usage_example() {
-    println!("\n=== basic usage ===");
-
-    // open database
-    let db = Velocity::open("./my_database").unwrap();
-
-    // write data
-    db.put("user:1".to_string(), b"alice".to_vec()).unwrap();
-    db.put("user:2".to_string(), b"bob".to_vec()).unwrap();
-
-    // read data
-    if let Some(value) = db.get("user:1").unwrap() {
-        let name = String::from_utf8_lossy(&value);
-        println!("user 1: {}", name);
-    }
-
-    // display statistics
-    let stats = db.stats();
-    println!("memtable: {} entries", stats.memtable_entries);
-    println!("sstable: {} files", stats.sstable_count);
-
-    // close database (automatic cleanup)
-    db.close().unwrap();
+#[derive(Parser)]
+#[command(name = "velocitydb")]
+#[command(about = "VelocityDB - High-performance database server")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-/// ==================== ADVANCED CONFIGURATION ====================
-fn advanced_configuration_example() {
-    println!("\n=== advanced configuration ===");
-
-    let config = VelocityConfig {
-        max_memtable_size: 5000,
-        cache_size: 1000,
-        bloom_false_positive_rate: 0.001,
-        compaction_threshold: 8,
-        enable_compression: false,
-    };
-
-    let _db = Velocity::open_with_config("./optimized_db", config).unwrap();
-
-    println!("started with optimized configuration");
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the database server
+    Server {
+        /// Configuration file path
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        
+        /// Database directory
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+        
+        /// Bind address
+        #[arg(short, long, default_value = "127.0.0.1:5432")]
+        bind: String,
+        
+        /// Enable verbose logging
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    
+    /// Create a new user
+    CreateUser {
+        /// Username
+        #[arg(short, long)]
+        username: String,
+        
+        /// Password
+        #[arg(short, long)]
+        password: String,
+    },
+    
+    /// Run performance benchmarks
+    Benchmark {
+        /// Database directory
+        #[arg(short, long, default_value = "./benchmark_db")]
+        data_dir: PathBuf,
+        
+        /// Number of operations
+        #[arg(short, long, default_value = "10000")]
+        operations: usize,
+    },
 }
 
-/// ==================== JSON STORAGE ====================
-fn json_storage_example() {
-    println!("\n=== json storage ===");
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
 
-    use serde::{Serialize, Deserialize};
-
-    #[derive(Serialize, Deserialize, Debug)]
-    struct User {
-        id: u32,
-        name: String,
-        email: String,
-        age: u8,
-    }
-
-    let db = Velocity::open("./json_db").unwrap();
-
-    // save as json
-    let user = User {
-        id: 1,
-        name: "alice".to_string(),
-        email: "alice@example.com".to_string(),
-        age: 30,
-    };
-
-    let json = serde_json::to_vec(&user).unwrap();
-    db.put(format!("user:{}", user.id), json).unwrap();
-
-    // read as json
-    if let Some(data) = db.get("user:1").unwrap() {
-        let loaded_user: User = serde_json::from_slice(&data).unwrap();
-        println!("loaded user: {:?}", loaded_user);
-    }
-}
-
-/// ==================== BATCH OPERATIONS ====================
-fn batch_operations_example() {
-    println!("\n=== batch operations ===");
-
-    let db = Velocity::open("./batch_db").unwrap();
-
-    // bulk write
-    let start = std::time::Instant::now();
-    for i in 0..10_000 {
-        let key = format!("item:{}", i);
-        let value = format!("data_{}", i).into_bytes();
-        db.put(key, value).unwrap();
-    }
-    let duration = start.elapsed();
-
-    println!("wrote 10,000 entries in {:?}", duration);
-
-    // bulk read
-    let start = std::time::Instant::now();
-    for i in 0..10_000 {
-        let key = format!("item:{}", i);
-        let _ = db.get(&key).unwrap();
-    }
-    let duration = start.elapsed();
-
-    println!("read 10,000 entries in {:?}", duration);
-}
-
-/// ==================== KEY-VALUE PATTERNS ====================
-fn key_patterns_example() {
-    println!("\n=== key-value patterns ===");
-
-    let db = Velocity::open("./pattern_db").unwrap();
-
-    // pattern 1: namespaced keys
-    db.put("user:1:profile".to_string(), b"alice profile".to_vec()).unwrap();
-    db.put("user:1:settings".to_string(), b"dark mode".to_vec()).unwrap();
-    db.put("user:2:profile".to_string(), b"bob profile".to_vec()).unwrap();
-
-    // pattern 2: timestamped keys
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    db.put(
-        format!("event:{}:login", timestamp),
-        b"user logged in".to_vec()
-    ).unwrap();
-
-    // pattern 3: composite keys
-    db.put("session:abc123:user:1".to_string(), b"session data".to_vec()).unwrap();
-
-    println!("various key patterns applied");
-}
-
-/// ==================== ERROR HANDLING ====================
-fn error_handling_example() {
-    println!("\n=== error handling ===");
-
-    let db = Velocity::open("./error_db").unwrap();
-
-    // safe read
-    match db.get("unknown_key") {
-        Ok(Some(value)) => {
-            println!("value found: {:?}", value);
-        }
-        Ok(None) => {
-            println!("key not found");
-        }
-        Err(e) => {
-            eprintln!("error occurred: {:?}", e);
-        }
-    }
-
-    // safe write
-    if let Err(e) = db.put("key".to_string(), vec![1, 2, 3]) {
-        eprintln!("write error: {:?}", e);
-    } else {
-        println!("write successful");
-    }
-}
-
-/// ==================== PERFORMANCE OPTIMIZATION ====================
-fn performance_optimization_example() {
-    println!("\n=== performance optimization ===");
-
-    // optimized config for large cache
-    let config = VelocityConfig {
-        max_memtable_size: 10_000,
-        cache_size: 5_000,
-        bloom_false_positive_rate: 0.001,
-        compaction_threshold: 10,
-        enable_compression: true,      // compression enabled for performance
-    };
-
-    let db = Velocity::open_with_config("./perf_db", config).unwrap();
-
-    // write frequently accessed data first (load into cache)
-    db.put("hot_key_1".to_string(), b"frequently accessed".to_vec()).unwrap();
-    db.put("hot_key_2".to_string(), b"frequently accessed".to_vec()).unwrap();
-
-    // manual flush control for batch operations
-    for i in 0..5_000 {
-        db.put(format!("batch:{}", i), vec![i as u8]).unwrap();
-    }
-
-    // manual flush (optional)
-    db.flush().unwrap();
-
-    println!("performance optimizations applied");
-}
-
-/// ==================== CONCURRENT USAGE ====================
-fn concurrent_usage_example() {
-    println!("\n=== concurrent usage ===");
-
-    use std::sync::Arc;
-    use std::thread;
-
-    let db = Arc::new(Velocity::open("./concurrent_db").unwrap());
-    let mut handles = vec![];
-
-    // multi-threaded writes
-    for thread_id in 0..4 {
-        let db_clone = Arc::clone(&db);
-        let handle = thread::spawn(move || {
-            for i in 0..1_000 {
-                let key = format!("thread_{}:item_{}", thread_id, i);
-                let value = format!("data from thread {}", thread_id).into_bytes();
-                db_clone.put(key, value).unwrap();
+    match cli.command {
+        Commands::Server { config, data_dir, bind, verbose } => {
+            // Initialize logging
+            if verbose {
+                env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+            } else {
+                env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
             }
-        });
-        handles.push(handle);
-    }
 
-    // wait for all threads
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    println!("wrote 4,000 entries from 4 threads");
-
-    // display statistics
-    let stats = db.stats();
-    println!("total entries: {}", stats.memtable_entries);
-}
-
-/// ==================== DATA MIGRATION ====================
-fn data_migration_example() {
-    println!("\n=== data migration ===");
-
-    let old_db = Velocity::open("./old_db").unwrap();
-    let new_db = Velocity::open("./new_db").unwrap();
-
-    // sample data in old database
-    for i in 0..1_000 {
-        old_db.put(format!("old:{}", i), vec![i as u8]).unwrap();
-    }
-
-    // migration (in real scenarios you would iterate over all keys)
-    println!("migrating data...");
-    for i in 0..1_000 {
-        if let Some(value) = old_db.get(&format!("old:{}", i)).unwrap() {
-            new_db.put(format!("new:{}", i), value).unwrap();
+            // Load configuration
+            let server_config = load_server_config(&config, &bind)?;
+            
+            // Initialize database
+            let db_config = VelocityConfig {
+                max_memtable_size: 10_000,
+                cache_size: 5_000,
+                bloom_false_positive_rate: 0.001,
+                compaction_threshold: 8,
+                enable_compression: false,
+                memory_only_mode: false,
+                batch_wal_writes: true,
+            };
+            
+            let db = Velocity::open_with_config(&data_dir, db_config)?;
+            log::info!("Database initialized at {:?}", data_dir);
+            
+            // Start server
+            let server = VelocityServer::new(db, server_config)?;
+            log::info!("Starting VelocityDB server...");
+            
+            server.start().await?;
+        }
+        
+        Commands::CreateUser { username, password } => {
+            let hash = hash_password(&password)?;
+            println!("User: {}", username);
+            println!("Password Hash: {}", hash);
+            println!("\nAdd this to your velocity.toml config:");
+            println!("[users]");
+            println!("{} = \"{}\"", username, hash);
+        }
+        
+        Commands::Benchmark { data_dir, operations } => {
+            run_benchmark(&data_dir, operations).await?;
         }
     }
 
-    println!("migration completed");
+    Ok(())
 }
 
-/// ==================== BACKUP & RECOVERY ====================
-fn backup_recovery_example() {
-    println!("\n=== backup & recovery ===");
+fn load_server_config(config_path: &PathBuf, bind_address: &str) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    let mut config = ServerConfig::default();
+    config.bind_address = bind_address.parse()?;
+    
+    // Try to load from config file
+    if config_path.exists() {
+        let config_content = std::fs::read_to_string(config_path)?;
+        let toml_config: toml::Value = toml::from_str(&config_content)?;
+        
+        // Parse configuration
+        if let Some(server) = toml_config.get("server") {
+            if let Some(max_conn) = server.get("max_connections") {
+                config.max_connections = max_conn.as_integer().unwrap_or(1000) as usize;
+            }
+            if let Some(rate_limit) = server.get("rate_limit_per_second") {
+                config.rate_limit_per_second = rate_limit.as_integer().unwrap_or(1000) as u32;
+            }
+        }
+        
+        if let Some(users) = toml_config.get("users") {
+            if let Some(users_table) = users.as_table() {
+                config.users.clear();
+                for (username, password_hash) in users_table {
+                    if let Some(hash_str) = password_hash.as_str() {
+                        config.users.insert(username.clone(), hash_str.to_string());
+                    }
+                }
+            }
+        }
+    } else {
+        // Create default config file
+        let default_config = r#"[server]
+max_connections = 1000
+rate_limit_per_second = 1000
+connection_timeout_seconds = 300
 
-    // production database
-    let db = Velocity::open("./production_db").unwrap();
-    db.put("critical_data".to_string(), b"important value".to_vec()).unwrap();
-    db.flush().unwrap(); // write to disk
+[users]
+admin = "$argon2id$v=19$m=65536,t=3,p=4$salt$hash"
 
-    // backup (filesystem level)
-    use std::fs;
-    println!("creating backup...");
-    let _ = fs::copy("./production_db/velocity.db", "./backup_db/velocity.db");
-
-    // recovery test
-    drop(db); // close database
-
-    println!("performing recovery...");
-    let recovered_db = Velocity::open("./production_db").unwrap();
-
-    if let Some(value) = recovered_db.get("critical_data").unwrap() {
-        println!("data recovered: {:?}", String::from_utf8_lossy(&value));
+[database]
+max_memtable_size = 10000
+cache_size = 5000
+bloom_false_positive_rate = 0.001
+compaction_threshold = 8
+"#;
+        std::fs::write(config_path, default_config)?;
+        log::info!("Created default configuration at {:?}", config_path);
     }
+    
+    Ok(config)
 }
 
-/// ==================== MONITORING ====================
-fn monitoring_example() {
-    println!("\n=== monitoring ===");
-
-    let db = Velocity::open("./monitored_db").unwrap();
-
-    // perform some operations
-    for i in 0..1_000 {
-        db.put(format!("key:{}", i), vec![i as u8]).unwrap();
+async fn run_benchmark(data_dir: &PathBuf, operations: usize) -> Result<(), Box<dyn std::error::Error>> {
+    println!("VelocityDB Performance Benchmark");
+    println!("=================================");
+    println!("Mode: PRODUCTION (Adaptive Batch Flushing + WAL)");
+    println!("Strategy: 2,4,8,16,32,64,128 packet adaptive flushing");
+    println!();
+    
+    let config = VelocityConfig {
+        max_memtable_size: 200_000,  // Large memtable
+        cache_size: 100_000,         // Large cache
+        bloom_false_positive_rate: 0.001,
+        compaction_threshold: 128,
+        enable_compression: false,
+        memory_only_mode: false,     // WAL ENABLED for durability!
+        batch_wal_writes: true,      // Adaptive batching
+    };
+    
+    let db = Velocity::open_with_config(data_dir, config)?;
+    
+    // Write benchmark - simple individual puts for maximum speed
+    println!("\nRunning write benchmark ({} operations)...", operations);
+    let start = std::time::Instant::now();
+    
+    for i in 0..operations {
+        let key = format!("bench_key_{:06}", i);
+        let value = format!("benchmark_value_{}", i).into_bytes();
+        db.put(key, value)?;
     }
-
-    // collect statistics
+    
+    // CRITICAL: Wait for async writes to actually complete!
+    println!("Waiting for async writes to complete...");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    
+    let write_duration = start.elapsed();
+    let write_ops_per_sec = operations as f64 / write_duration.as_secs_f64();
+    
+    println!("Write Results:");
+    println!("  Duration: {:?}", write_duration);
+    println!("  Ops/sec: {:.0}", write_ops_per_sec);
+    println!("  Avg latency: {:.2} μs", write_duration.as_micros() as f64 / operations as f64);
+    
+    // Verify data is actually written
+    let stats_after_write = db.stats();
+    println!("  Verified memtable entries: {}", stats_after_write.memtable_entries);
+    
+    if stats_after_write.memtable_entries != operations {
+        println!("  ⚠️  WARNING: Not all writes completed! Expected {}, got {}", 
+                 operations, stats_after_write.memtable_entries);
+    }
+    
+    println!("Write Results:");
+    println!("  Duration: {:?}", write_duration);
+    println!("  Ops/sec: {:.0}", write_ops_per_sec);
+    println!("  Avg latency: {:.2} μs", write_duration.as_micros() as f64 / operations as f64);
+    
+    // Read benchmark
+    println!("\nRunning read benchmark ({} operations)...", operations);
+    let start = std::time::Instant::now();
+    
+    for i in 0..operations {
+        let key = format!("bench_key_{:06}", i);
+        let _ = db.get(&key)?;
+    }
+    
+    let read_duration = start.elapsed();
+    let read_ops_per_sec = operations as f64 / read_duration.as_secs_f64();
+    
+    println!("Read Results:");
+    println!("  Duration: {:?}", read_duration);
+    println!("  Ops/sec: {:.0}", read_ops_per_sec);
+    println!("  Avg latency: {:.2} μs", read_duration.as_micros() as f64 / operations as f64);
+    
+    // Database stats
     let stats = db.stats();
-
-    println!("\ndatabase statistics:");
-    println!("  ├─ memtable entries: {}", stats.memtable_entries);
-    println!("  ├─ sstable files: {}", stats.sstable_count);
-    println!("  ├─ cache entries: {}", stats.cache_entries);
-    println!("  └─ total sstable size: {} bytes", stats.total_sstable_size);
-
-    // estimated ram usage
-    let estimated_ram = stats.memtable_entries * 100; // average entry size
-    println!("\nestimated ram usage: {} kb", estimated_ram / 1024);
-}
-
-/// ==================== MAIN PROGRAM ====================
-fn main() {
-    println!("velocity database - usage examples\n");
-
-    basic_usage_example();
-    advanced_configuration_example();
-    json_storage_example();
-    batch_operations_example();
-    key_patterns_example();
-    error_handling_example();
-    performance_optimization_example();
-    concurrent_usage_example();
-    data_migration_example();
-    backup_recovery_example();
-    monitoring_example();
-
-    println!("\nall examples completed");
+    println!("\nDatabase Statistics:");
+    println!("  Memtable entries: {}", stats.memtable_entries);
+    println!("  SSTable count: {}", stats.sstable_count);
+    println!("  Cache entries: {}", stats.cache_entries);
+    println!("  Total SSTable size: {} bytes", stats.total_sstable_size);
+    
+    db.close()?;
+    
+    println!("\nBenchmark completed!");
+    Ok(())
 }

@@ -11,15 +11,39 @@ categories = ["database", "data-structures"]
 readme = "README.md"
 
 [dependencies]
-# Serde için JSON desteği
+# Core dependencies
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 log = "0.4"
 env_logger = "0.11"
 
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-rustls = "0.24"
+rustls = "0.21"
+rustls-pemfile = "1.0"
+
+# Network and protocol
+bytes = "1.5"
+futures = "0.3"
+
+# Security
+argon2 = "0.5"
+sha2 = "0.10"
+rand = "0.8"
+crc32fast = "1.3"
+
+# SQL parsing
+sqlparser = "0.39"
+
+# Configuration
+toml = "0.8"
+clap = { version = "4.0", features = ["derive"] }
+
 [dev-dependencies]
 criterion = "0.5"  # Benchmarking
 tempfile = "3.8"   # Geçici dosyalar için
+tokio-test = "0.4" # Async testing utilities
 
 [features]
 default = []
@@ -38,6 +62,10 @@ inherits = "release"
 
 [profile.dev]
 opt-level = 0
+
+[[example]]
+name = "client_example"
+path = "examples/client_example.rs"
 
 [package.metadata.docs.rs]
 all-features = true
