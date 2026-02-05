@@ -230,7 +230,5 @@ MIT License - see LICENSE file for details.
 
 ## 🔗 Links
 
-- **Website**: https://velocitydb.org
-- **Documentation**: https://docs.velocitydb.org
 - **Protocol Spec**: [VELOCITY_PROTOCOL.md](VELOCITY_PROTOCOL.md)
 - **Performance**: [STATISTICS.md](STATISTICS.md)
