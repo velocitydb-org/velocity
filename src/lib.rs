@@ -9,12 +9,14 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use std::thread;
 use std::sync::mpsc;
+use serde::Serialize;
 
 // Module declarations
 pub mod server;
 pub mod sql;
 pub mod client;
 pub mod performance;
+pub mod addon;
 
 /// ==================== DATA TYPES ====================
 pub type VeloKey = String;
@@ -370,7 +372,8 @@ impl AsyncWriteQueue {
         config: &VelocityConfig,
         force_flush: bool,
     ) {
-        // Always write to WAL for durability (unless memory-only mode)
+        // ONLY write to WAL here (memtable is updated synchronously in put())
+        // This ensures durability without blocking reads
         if !config.memory_only_mode {
             if let Ok(mut wal_guard) = wal.lock() {
                 for op in batch {
@@ -383,14 +386,9 @@ impl AsyncWriteQueue {
             }
         }
         
-        // Update memory structures
-        if let (Ok(mut memtable_guard), Ok(mut filter_guard)) = 
-            (memtable.write(), filter.write()) {
-            for op in batch {
-                filter_guard.add(&op.key);
-                memtable_guard.insert(op.key.clone(), op.value.clone());
-            }
-        }
+        // NOTE: Memtable and filter are now updated synchronously in put()
+        // This was the critical bug - async writes caused race conditions
+        // where SELECT couldn't see data immediately after INSERT
     }
     
     fn send(&self, key: VeloKey, value: VeloValue) -> Result<(), mpsc::SendError<WriteOperation>> {
@@ -632,6 +630,12 @@ impl SSTable {
             if found_key == key {
                 let mut v_buf = vec![0u8; v_size];
                 file.read_exact(&mut v_buf)?;
+                
+                // Check for tombstone
+                if v_buf.is_empty() {
+                    return Ok(None);
+                }
+                
                 return Ok(Some(v_buf));
             } else if found_key.as_ref() > key {
                 break;
@@ -646,7 +650,7 @@ impl SSTable {
 
 /// ==================== VELOCITY V3 ====================
 pub struct Velocity {
-    memtable: Arc<RwLock<BTreeMap<VeloKey, VeloValue>>>,
+    pub memtable: Arc<RwLock<BTreeMap<VeloKey, VeloValue>>>,
     sstables: Arc<RwLock<Vec<SSTable>>>,
     cache: Arc<Mutex<UltraFastCache>>,
     filter: Arc<RwLock<BloomFilter>>,
@@ -750,14 +754,24 @@ impl Velocity {
 
     #[inline(always)]
     pub fn put(&self, key: VeloKey, value: VeloValue) -> VeloResult<()> {
-        // Ultra-fast async write - just queue it!
-        self.write_queue.send(key.clone(), value.clone())
-            .map_err(|_| VeloError::InvalidOperation("Write queue full".to_string()))?;
+        // CRITICAL FIX: Write to memtable IMMEDIATELY for read consistency
+        // This ensures SELECT queries can see data right after INSERT
+        {
+            let mut memtable = self.memtable.write().unwrap();
+            let mut filter = self.filter.write().unwrap();
+            
+            filter.add(&key);
+            memtable.insert(key.clone(), value.clone());
+        }
         
         // Update cache immediately for read consistency
         if let Ok(mut cache) = self.cache.try_lock() {
-            cache.put(key, value);
+            cache.put(key.clone(), value.clone());
         }
+        
+        // Queue for WAL write (async for performance)
+        self.write_queue.send(key, value)
+            .map_err(|_| VeloError::InvalidOperation("Write queue full".to_string()))?;
         
         Ok(())
     }
@@ -768,6 +782,11 @@ impl Velocity {
             self.put(key, value)?;
         }
         Ok(())
+    }
+
+    pub fn delete(&self, key: VeloKey) -> VeloResult<()> {
+        // LSM Delete: Insert a tombstone (empty value)
+        self.put(key, vec![])
     }
 
     #[inline(always)]
@@ -782,24 +801,27 @@ impl Velocity {
             }
         }
 
-        // 2. Memtable (try non-blocking first)
+        // 2. Memtable
         {
-            let memtable_guard = self.memtable.try_read();
-            if let Ok(memtable) = memtable_guard {
-                if let Some(value) = memtable.get(key) {
-                    // Update cache in background
-                    let cache = self.cache.clone();
-                    let key_clone = key.to_string();
-                    let value_clone = value.clone();
-                    
-                    std::thread::spawn(move || {
-                        if let Ok(mut cache_guard) = cache.lock() {
-                            cache_guard.put(key_clone, value_clone);
-                        }
-                    });
-                    
-                    return Ok(Some(value.clone()));
+            let memtable = self.memtable.read().unwrap();
+            if let Some(value) = memtable.get(key) {
+                // Check if it's a tombstone (empty value)
+                if value.is_empty() {
+                    return Ok(None);
                 }
+
+                // Update cache in background
+                let cache = self.cache.clone();
+                let key_clone = key.to_string();
+                let value_clone = value.clone();
+                
+                std::thread::spawn(move || {
+                    if let Ok(mut cache_guard) = cache.lock() {
+                        cache_guard.put(key_clone, value_clone);
+                    }
+                });
+                
+                return Ok(Some(value.clone()));
             }
         }
 
@@ -875,21 +897,33 @@ impl Velocity {
         let sstables = self.sstables.read().unwrap();
         let cache = self.cache.lock().unwrap();
 
+        let sstable_records: usize = sstables.iter().map(|s| s.entry_count).sum();
+        let sstable_size: u64 = sstables.iter().map(|s| s.size).sum();
+        
+        // Estimate memtable size in bytes
+        let memtable_size: u64 = memtable.iter()
+            .map(|(k, v)| (k.len() + v.len() + 32) as u64) // 32 bytes overhead estimate
+            .sum();
+
         VelocityStats {
             memtable_entries: memtable.len(),
             sstable_count: sstables.len(),
             cache_entries: cache.len(),
-            total_sstable_size: sstables.iter().map(|s| s.size).sum(),
+            total_sstable_size: sstable_size,
+            total_records: memtable.len() + sstable_records,
+            total_size_bytes: sstable_size + memtable_size,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct VelocityStats {
     pub memtable_entries: usize,
     pub sstable_count: usize,
     pub cache_entries: usize,
     pub total_sstable_size: u64,
+    pub total_records: usize,
+    pub total_size_bytes: u64,
 }
 
 impl Drop for Velocity {

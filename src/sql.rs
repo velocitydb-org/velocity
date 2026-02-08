@@ -415,17 +415,26 @@ impl SqlEngine {
     }
 
     async fn execute_prefix_scan(&self, prefix: &str) -> VeloResult<QueryResult> {
-        // This is a simplified implementation
-        // In a real system, you'd want to implement efficient prefix scanning
+        // Scan memtable for keys with the given prefix
         let mut results = Vec::new();
         
-        // For now, we'll simulate by checking some common patterns
-        for i in 0..100 {
-            let key = format!("{}{}", prefix, i);
-            if let Some(value) = self.db.get(&key)? {
-                results.push(Row {
-                    values: vec![SqlValue::String(key), SqlValue::from(&value)],
-                });
+        // Access memtable directly for prefix scan
+        if let Ok(memtable) = self.db.memtable.read() {
+            // BTreeMap supports efficient range queries
+            // Get all keys that start with the prefix
+            let end_prefix = format!("{}\u{10FFFF}", prefix); // Unicode max char for range end
+            
+            for (key, value) in memtable.range(prefix.to_string()..end_prefix) {
+                if key.starts_with(prefix) {
+                    results.push(Row {
+                        values: vec![SqlValue::String(key.clone()), SqlValue::from(value)],
+                    });
+                    
+                    // Safety limit to prevent huge result sets
+                    if results.len() >= 1000 {
+                        break;
+                    }
+                }
             }
         }
 

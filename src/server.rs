@@ -95,37 +95,51 @@ impl VelocityMessage {
         buffer
     }
 
-    pub fn decode(mut data: &[u8]) -> VeloResult<Self> {
+    pub fn decode(data: &[u8]) -> VeloResult<Self> {
         if data.len() < 14 {
             return Err(VeloError::InvalidOperation("Message too short".to_string()));
         }
 
-        // Verify magic
-        let magic = data.get_u32_le();
+        // Save original data for checksum verification
+        let original_data = data;
+        
+        // Parse header: [MAGIC:4][VERSION:1][TYPE:1][LENGTH:4][PAYLOAD:N][CRC:4]
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if magic != MAGIC {
-            return Err(VeloError::InvalidOperation("Invalid magic".to_string()));
+            return Err(VeloError::InvalidOperation(format!("Invalid magic: {:08x}", magic)));
         }
 
-        let version = data.get_u8();
+        let version = data[4];
         if version != VERSION {
-            return Err(VeloError::InvalidOperation("Unsupported version".to_string()));
+            return Err(VeloError::InvalidOperation(format!("Unsupported version: {}", version)));
         }
 
-        let msg_type = MessageType::from(data.get_u8());
-        let payload_len = data.get_u32_le() as usize;
+        let msg_type = MessageType::from(data[5]);
+        let payload_len = u32::from_le_bytes([data[6], data[7], data[8], data[9]]) as usize;
 
-        if data.len() < payload_len + 4 {
+        if data.len() < 10 + payload_len + 4 {
             return Err(VeloError::InvalidOperation("Incomplete message".to_string()));
         }
 
-        let payload = data[..payload_len].to_vec();
-        let checksum = (&data[payload_len..]).get_u32_le();
+        let payload = data[10..10+payload_len].to_vec();
+        let checksum = u32::from_le_bytes([
+            data[10+payload_len],
+            data[10+payload_len+1],
+            data[10+payload_len+2],
+            data[10+payload_len+3],
+        ]);
 
         // Verify checksum
         let mut hasher = CrcHasher::new();
-        hasher.update(&data[..data.len()-4]);
-        if hasher.finalize() != checksum {
-            return Err(VeloError::CorruptedData("Invalid checksum".to_string()));
+        hasher.update(&original_data[..10+payload_len]);
+        let calculated_checksum = hasher.finalize();
+        
+        if calculated_checksum != checksum {
+            return Err(VeloError::CorruptedData(format!(
+                "Invalid checksum: expected {:08x}, got {:08x}",
+                calculated_checksum,
+                checksum
+            )));
         }
 
         Ok(Self { msg_type, payload })
@@ -155,7 +169,7 @@ impl Default for ServerConfig {
         );
 
         Self {
-            bind_address: "127.0.0.1:5432".parse().unwrap(),
+            bind_address: "127.0.0.1:2005".parse().unwrap(),
             max_connections: 1000,
             connection_timeout: Duration::from_secs(300),
             rate_limit_per_second: 1000,
@@ -175,6 +189,7 @@ struct ClientState {
     last_activity: Instant,
     command_count: u64,
     rate_limiter: RateLimiter,
+    current_db: String,
 }
 
 impl ClientState {
@@ -185,6 +200,7 @@ impl ClientState {
             last_activity: Instant::now(),
             command_count: 0,
             rate_limiter: RateLimiter::new(rate_limit),
+            current_db: "default".to_string(),
         }
     }
 }
@@ -224,10 +240,12 @@ impl RateLimiter {
     }
 }
 
+use crate::addon::DatabaseManager;
+
 /// VelocityDB Server
 pub struct VelocityServer {
-    db: Arc<Velocity>,
-    sql_engine: Arc<SqlEngine>,
+    db_manager: Arc<DatabaseManager>,
+    // sql_engine: Arc<SqlEngine>, // Removed, we create it per request
     config: ServerConfig,
     server_fingerprint: String,
     connection_semaphore: Arc<Semaphore>,
@@ -235,10 +253,7 @@ pub struct VelocityServer {
 }
 
 impl VelocityServer {
-    pub fn new(db: Velocity, config: ServerConfig) -> VeloResult<Self> {
-        let db_arc = Arc::new(db);
-        let sql_engine = Arc::new(SqlEngine::new(db_arc.clone()));
-        
+    pub fn new(db_manager: Arc<DatabaseManager>, config: ServerConfig) -> VeloResult<Self> {
         // Generate server fingerprint
         let server_key = b"velocity_server_key_placeholder"; // In production, use actual server key
         let mut hasher = Sha256::new();
@@ -246,8 +261,7 @@ impl VelocityServer {
         let server_fingerprint = format!("{:x}", hasher.finalize());
 
         Ok(Self {
-            db: db_arc,
-            sql_engine,
+            db_manager,
             config: config.clone(),
             server_fingerprint,
             connection_semaphore: Arc::new(Semaphore::new(config.max_connections)),
@@ -327,12 +341,35 @@ impl VelocityServer {
                                         let message_len = 14 + message.payload.len();
                                         buffer.advance(message_len);
                                         
-                                        if let Some(response) = self.handle_message(message, addr).await? {
-                                            let response_data = response.encode();
-                                            stream.write_all(&response_data).await?;
+                                        match self.handle_message(message, addr).await {
+                                            Ok(Some(response)) => {
+                                                let response_data = response.encode();
+                                                if let Err(e) = stream.write_all(&response_data).await {
+                                                    log::error!("Failed to send response to {}: {:?}", addr, e);
+                                                    return Err(VeloError::IoError(e));
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                // No response needed
+                                            }
+                                            Err(e) => {
+                                                log::error!("Error handling message from {}: {:?}", addr, e);
+                                                // Send error response
+                                                let error_msg = format!("{:?}", e);
+                                                let error_response = VelocityMessage::new(
+                                                    MessageType::Error,
+                                                    error_msg.into_bytes()
+                                                );
+                                                let _ = stream.write_all(&error_response.encode()).await;
+                                            }
                                         }
                                     }
-                                    Err(_) => break, // Need more data
+                                    Err(e) => {
+                                        log::error!("Failed to decode message from {}: {:?}", addr, e);
+                                        log::error!("Buffer length: {}, hex: {}", buffer.len(), 
+                                            buffer.iter().take(32).map(|b| format!("{:02x}", b)).collect::<String>());
+                                        break; // Need more data or invalid message
+                                    }
                                 }
                             }
                         }
@@ -382,9 +419,13 @@ impl VelocityServer {
 
             MessageType::Command => {
                 // Check authentication
-                let authenticated = {
+                let (authenticated, current_db) = {
                     let clients = self.clients.read().await;
-                    clients.get(&addr).map(|c| c.authenticated).unwrap_or(false)
+                    if let Some(c) = clients.get(&addr) {
+                        (c.authenticated, c.current_db.clone())
+                    } else {
+                        (false, "default".to_string())
+                    }
                 };
 
                 if !authenticated {
@@ -394,7 +435,7 @@ impl VelocityServer {
                     )));
                 }
 
-                self.handle_command(message.payload, addr).await
+                self.handle_command(message.payload, addr, &current_db).await
             }
 
             MessageType::Ping => {
@@ -429,6 +470,30 @@ impl VelocityServer {
         let username = parts[0];
         let password = parts[1];
 
+        // Dynamic API Key validation
+        if username == "apikey" && password.starts_with("vdb_") {
+             if let Some(default_db) = self.db_manager.get_database("default") {
+                 let auth_key = format!("auth:keys:{}", password);
+                 if let Ok(Some(db_name_bytes)) = default_db.get(&auth_key) {
+                     let db_name = String::from_utf8_lossy(&db_name_bytes).to_string();
+                     // Authentication successful via dynamic API Key
+                     {
+                        let mut clients = self.clients.write().await;
+                        if let Some(client) = clients.get_mut(&addr) {
+                            client.authenticated = true;
+                            client.username = Some(username.to_string());
+                            client.current_db = db_name.clone(); // Auto-scope to the linked database
+                        }
+                    }
+                    log::info!("Dynamic API Key validated. Scoped to database '{}' from {}", db_name, addr);
+                    return Ok(Some(VelocityMessage::new(
+                        MessageType::AuthResponse,
+                        b"OK".to_vec()
+                    )));
+                 }
+             }
+        }
+
         // Verify credentials
         if let Some(stored_hash) = self.config.users.get(username) {
             let argon2 = Argon2::default();
@@ -459,7 +524,7 @@ impl VelocityServer {
         )))
     }
 
-    async fn handle_command(&self, payload: Vec<u8>, addr: SocketAddr) -> VeloResult<Option<VelocityMessage>> {
+    async fn handle_command(&self, payload: Vec<u8>, addr: SocketAddr, current_db: &str) -> VeloResult<Option<VelocityMessage>> {
         let sql = String::from_utf8_lossy(&payload);
         
         // Update command count
@@ -469,21 +534,101 @@ impl VelocityServer {
                 client.command_count += 1;
             }
         }
-
-        match self.sql_engine.execute(&sql).await {
-            Ok(result) => {
-                let response = serde_json::to_vec(&result).unwrap_or_else(|_| b"Serialization error".to_vec());
-                Ok(Some(VelocityMessage::new(MessageType::Response, response)))
+        
+        // Handle Meta-Commands (CREATE DATABASE, USE)
+        let sql_upper = sql.trim().to_uppercase();
+        if sql_upper.starts_with("CREATE DATABASE") {
+             let parts: Vec<&str> = sql.trim().split_whitespace().collect();
+             if parts.len() >= 3 {
+                 let db_name = parts[2];
+                 match self.db_manager.create_database(db_name, None) {
+                     Ok(_) => {
+                         let msg = format!("Database '{}' created successfully", db_name);
+                         return Ok(Some(VelocityMessage::new(MessageType::Response, msg.into_bytes())));
+                     },
+                    Err(e) => {
+                        let msg = format!("Failed to create database: {}", e);
+                        return Ok(Some(VelocityMessage::new(MessageType::Error, msg.into_bytes())));
+                    }
+                }
             }
-            Err(e) => {
-                let error_msg = format!("SQL Error: {:?}", e);
-                Ok(Some(VelocityMessage::new(MessageType::Error, error_msg.into_bytes())))
+        } else if sql_upper.starts_with("DROP DATABASE") {
+            let parts: Vec<&str> = sql.trim().split_whitespace().collect();
+            if parts.len() >= 3 {
+                let db_name = parts[2];
+                match self.db_manager.drop_database(db_name) {
+                    Ok(_) => {
+                        let msg = format!("Database '{}' dropped successfully", db_name);
+                        return Ok(Some(VelocityMessage::new(MessageType::Response, msg.into_bytes())));
+                    },
+                    Err(e) => {
+                        let msg = format!("Failed to drop database: {}", e);
+                        return Ok(Some(VelocityMessage::new(MessageType::Error, msg.into_bytes())));
+                    }
+                }
             }
+        } else if sql_upper == "SHOW DATABASES" {
+            let list = self.db_manager.list_databases();
+            let response = serde_json::to_vec(&list).unwrap();
+            return Ok(Some(VelocityMessage::new(MessageType::Response, response)));
+        } else if sql_upper.starts_with("DATABASE STATS") {
+            let parts: Vec<&str> = sql.trim().split_whitespace().collect();
+            let db_name = if parts.len() >= 3 { parts[2] } else { current_db };
+            
+            if let Some(db) = self.db_manager.get_database(db_name) {
+                let s = db.stats();
+                let stats = serde_json::json!({
+                    "name": db_name,
+                    "memtable_entries": s.memtable_entries,
+                    "sstable_count": s.sstable_count,
+                    "cache_entries": s.cache_entries,
+                    "total_sstable_size": s.total_sstable_size,
+                    "record_count": s.total_records,
+                    "size_bytes": s.total_size_bytes
+                });
+                let response = serde_json::to_vec(&stats).unwrap();
+                return Ok(Some(VelocityMessage::new(MessageType::Response, response)));
+            } else {
+                return Ok(Some(VelocityMessage::new(MessageType::Error, format!("Database '{}' not found", db_name).into_bytes())));
+            }
+        } else if sql_upper.starts_with("USE") {
+            let parts: Vec<&str> = sql.trim().split_whitespace().collect();
+            if parts.len() >= 2 {
+                let db_name = parts[1];
+                if self.db_manager.get_database(db_name).is_some() {
+                    // Update client state
+                    let mut clients = self.clients.write().await;
+                    if let Some(client) = clients.get_mut(&addr) {
+                        client.current_db = db_name.to_string();
+                    }
+                    let msg = format!("Switched to database '{}'", db_name);
+                    return Ok(Some(VelocityMessage::new(MessageType::Response, msg.into_bytes())));
+                } else {
+                    return Ok(Some(VelocityMessage::new(MessageType::Error, format!("Database '{}' not found", db_name).into_bytes())));
+                }
+            }
+        }
+        
+        // Execute SQL on current DB
+        if let Some(db) = self.db_manager.get_database(current_db) {
+            let engine = SqlEngine::new(db);
+            match engine.execute(&sql).await {
+                Ok(result) => {
+                    let response = serde_json::to_vec(&result).unwrap_or_else(|_| b"Serialization error".to_vec());
+                    Ok(Some(VelocityMessage::new(MessageType::Response, response)))
+                }
+                Err(e) => {
+                    let error_msg = format!("SQL Error: {:?}", e);
+                    Ok(Some(VelocityMessage::new(MessageType::Error, error_msg.into_bytes())))
+                }
+            }
+        } else {
+            Ok(Some(VelocityMessage::new(MessageType::Error, b"Current database not found".to_vec())))
         }
     }
 
     async fn handle_stats(&self) -> VeloResult<Option<VelocityMessage>> {
-        let db_stats = self.db.stats();
+        let db_stats = self.db_manager.stats();
         let client_count = self.clients.read().await.len();
         
         let stats = serde_json::json!({
@@ -508,8 +653,7 @@ impl VelocityServer {
 impl Clone for VelocityServer {
     fn clone(&self) -> Self {
         Self {
-            db: self.db.clone(),
-            sql_engine: self.sql_engine.clone(),
+            db_manager: self.db_manager.clone(),
             config: self.config.clone(),
             server_fingerprint: self.server_fingerprint.clone(),
             connection_semaphore: self.connection_semaphore.clone(),

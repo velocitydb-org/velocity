@@ -27,7 +27,7 @@ enum Commands {
         data_dir: PathBuf,
         
         /// Bind address
-        #[arg(short, long, default_value = "127.0.0.1:5432")]
+        #[arg(short, long, default_value = "127.0.0.1:2005")]
         bind: String,
         
         /// Enable verbose logging
@@ -88,8 +88,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let db = Velocity::open_with_config(&data_dir, db_config)?;
             log::info!("Database initialized at {:?}", data_dir);
             
+            // Initialize Addon/Database Manager
+            let db_manager = std::sync::Arc::new(velocity::addon::DatabaseManager::new(db, config.clone()));
+            log::info!("Database manager initialized with config {:?}", config);
+            
             // Start server
-            let server = VelocityServer::new(db, server_config)?;
+            let server = VelocityServer::new(db_manager, server_config)?;
             log::info!("Starting VelocityDB server...");
             
             server.start().await?;

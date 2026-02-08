@@ -44,7 +44,7 @@ impl VelocityClient {
 
     /// Connect with cached fingerprint verification
     pub async fn connect_with_fingerprint(address: &str, expected_fingerprint: &str) -> VeloResult<Self> {
-        let mut client = Self::connect(address).await?;
+        let client = Self::connect(address).await?;
         
         if let Some(ref fingerprint) = client.server_fingerprint {
             if fingerprint != expected_fingerprint {

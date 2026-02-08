@@ -43,7 +43,7 @@ RUN chown velocitydb:velocitydb /usr/local/bin/velocitydb && \
 USER velocitydb
 
 # Expose port
-EXPOSE 5432
+EXPOSE 2005
 
 # Set data directory
 VOLUME ["/var/lib/velocitydb"]
@@ -56,4 +56,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 CMD ["/usr/local/bin/velocitydb", "server", \
      "--config", "/etc/velocitydb/velocity.toml", \
      "--data-dir", "/var/lib/velocitydb", \
-     "--bind", "0.0.0.0:5432"]
+     "--bind", "0.0.0.0:2005"]

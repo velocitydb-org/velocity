@@ -5,7 +5,7 @@ services:
     build: .
     container_name: velocitydb
     ports:
-      - "5432:5432"
+      - "2005:2005"
     volumes:
       - velocitydb_data:/var/lib/velocitydb
       - ./velocity.toml:/etc/velocitydb/velocity.toml:ro
