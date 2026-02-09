@@ -1,28 +1,26 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-
-/// Performance metrics collector
 #[derive(Debug)]
 pub struct PerformanceMetrics {
-    // Operation counters
+
     pub reads: AtomicU64,
     pub writes: AtomicU64,
     pub cache_hits: AtomicU64,
     pub cache_misses: AtomicU64,
-    
-    // Latency tracking
+
+
     pub read_latencies: Arc<RwLock<LatencyTracker>>,
     pub write_latencies: Arc<RwLock<LatencyTracker>>,
-    
-    // Throughput tracking
+
+
     pub operations_per_second: AtomicU64,
     pub bytes_read: AtomicU64,
     pub bytes_written: AtomicU64,
-    
-    // Error tracking
+
+
     pub errors: AtomicU64,
     pub timeouts: AtomicU64,
 }
@@ -49,43 +47,44 @@ impl PerformanceMetrics {
     pub fn record_read(&self, latency: Duration, bytes: usize, cache_hit: bool) {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.bytes_read.fetch_add(bytes as u64, Ordering::Relaxed);
-        
+
         if cache_hit {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
         } else {
             self.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
-        
+
         let latencies = self.read_latencies.clone();
         tokio::spawn(async move {
             let mut tracker = latencies.write().await;
             tracker.record(latency);
         });
     }
-    
+
     pub fn record_write(&self, latency: Duration, bytes: usize) {
         self.writes.fetch_add(1, Ordering::Relaxed);
-        self.bytes_written.fetch_add(bytes as u64, Ordering::Relaxed);
-        
+        self.bytes_written
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+
         let latencies = self.write_latencies.clone();
         tokio::spawn(async move {
             let mut tracker = latencies.write().await;
             tracker.record(latency);
         });
     }
-    
+
     pub fn record_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn record_timeout(&self) {
         self.timeouts.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub async fn get_summary(&self) -> PerformanceSummary {
         let read_stats = self.read_latencies.read().await.get_stats();
         let write_stats = self.write_latencies.read().await.get_stats();
-        
+
         PerformanceSummary {
             total_reads: self.reads.load(Ordering::Relaxed),
             total_writes: self.writes.load(Ordering::Relaxed),
@@ -121,7 +120,7 @@ pub struct PerformanceSummary {
     pub total_timeouts: u64,
 }
 
-/// Latency tracker with percentile calculations
+
 #[derive(Debug)]
 pub struct LatencyTracker {
     samples: VecDeque<Duration>,
@@ -135,25 +134,25 @@ impl LatencyTracker {
             max_samples: 1000,
         }
     }
-    
+
     pub fn record(&mut self, latency: Duration) {
         if self.samples.len() >= self.max_samples {
             self.samples.pop_front();
         }
         self.samples.push_back(latency);
     }
-    
+
     pub fn get_stats(&self) -> LatencyStats {
         if self.samples.is_empty() {
             return LatencyStats::default();
         }
-        
+
         let mut sorted: Vec<Duration> = self.samples.iter().cloned().collect();
         sorted.sort();
-        
+
         let len = sorted.len();
         let sum: Duration = sorted.iter().sum();
-        
+
         LatencyStats {
             count: len as u64,
             min: sorted[0],
@@ -177,7 +176,7 @@ pub struct LatencyStats {
     pub p99: Duration,
 }
 
-/// Adaptive cache sizing based on performance metrics
+
 pub struct AdaptiveCacheManager {
     current_size: AtomicUsize,
     min_size: usize,
@@ -188,7 +187,12 @@ pub struct AdaptiveCacheManager {
 }
 
 impl AdaptiveCacheManager {
-    pub fn new(initial_size: usize, min_size: usize, max_size: usize, target_hit_rate: f64) -> Self {
+    pub fn new(
+        initial_size: usize,
+        min_size: usize,
+        max_size: usize,
+        target_hit_rate: f64,
+    ) -> Self {
         Self {
             current_size: AtomicUsize::new(initial_size),
             min_size,
@@ -198,31 +202,31 @@ impl AdaptiveCacheManager {
             last_adjustment: Arc::new(RwLock::new(Instant::now())),
         }
     }
-    
+
     pub async fn adjust_size(&self, metrics: &PerformanceMetrics) -> Option<usize> {
         let now = Instant::now();
         let mut last_adj = self.last_adjustment.write().await;
-        
+
         if now.duration_since(*last_adj) < self.adjustment_interval {
             return None;
         }
-        
+
         *last_adj = now;
         drop(last_adj);
-        
+
         let summary = metrics.get_summary().await;
         let current_size = self.current_size.load(Ordering::Relaxed);
-        
+
         let new_size = if summary.cache_hit_rate < self.target_hit_rate {
-            // Increase cache size
+
             (current_size as f64 * 1.2).min(self.max_size as f64) as usize
         } else if summary.cache_hit_rate > self.target_hit_rate + 0.1 {
-            // Decrease cache size slightly
+
             (current_size as f64 * 0.9).max(self.min_size as f64) as usize
         } else {
             current_size
         };
-        
+
         if new_size != current_size {
             self.current_size.store(new_size, Ordering::Relaxed);
             Some(new_size)
@@ -230,13 +234,13 @@ impl AdaptiveCacheManager {
             None
         }
     }
-    
+
     pub fn get_current_size(&self) -> usize {
         self.current_size.load(Ordering::Relaxed)
     }
 }
 
-/// Batch operation optimizer
+
 pub struct BatchOptimizer {
     pending_writes: Arc<RwLock<Vec<(String, Vec<u8>)>>>,
     batch_size: usize,
@@ -253,11 +257,11 @@ impl BatchOptimizer {
             last_flush: Arc::new(RwLock::new(Instant::now())),
         }
     }
-    
+
     pub async fn add_write(&self, key: String, value: Vec<u8>) -> Option<Vec<(String, Vec<u8>)>> {
         let mut pending = self.pending_writes.write().await;
         pending.push((key, value));
-        
+
         if pending.len() >= self.batch_size {
             let batch = pending.drain(..).collect();
             *self.last_flush.write().await = Instant::now();
@@ -266,11 +270,11 @@ impl BatchOptimizer {
             None
         }
     }
-    
+
     pub async fn flush_if_needed(&self) -> Option<Vec<(String, Vec<u8>)>> {
         let now = Instant::now();
         let last_flush = *self.last_flush.read().await;
-        
+
         if now.duration_since(last_flush) >= self.batch_timeout {
             let mut pending = self.pending_writes.write().await;
             if !pending.is_empty() {
@@ -286,7 +290,7 @@ impl BatchOptimizer {
     }
 }
 
-/// Connection pool with load balancing
+
 pub struct LoadBalancer {
     servers: Vec<String>,
     current_index: AtomicUsize,
@@ -302,31 +306,32 @@ impl LoadBalancer {
             health_status: Arc::new(RwLock::new(health_status)),
         }
     }
-    
+
     pub async fn get_next_server(&self) -> Option<String> {
         let health = self.health_status.read().await;
-        let healthy_servers: Vec<(usize, &String)> = self.servers
+        let healthy_servers: Vec<(usize, &String)> = self
+            .servers
             .iter()
             .enumerate()
             .filter(|(i, _)| health[*i])
             .collect();
-        
+
         if healthy_servers.is_empty() {
             return None;
         }
-        
+
         let current = self.current_index.fetch_add(1, Ordering::Relaxed);
         let index = current % healthy_servers.len();
         Some(healthy_servers[index].1.clone())
     }
-    
+
     pub async fn mark_server_unhealthy(&self, server: &str) {
         if let Some(index) = self.servers.iter().position(|s| s == server) {
             let mut health = self.health_status.write().await;
             health[index] = false;
         }
     }
-    
+
     pub async fn mark_server_healthy(&self, server: &str) {
         if let Some(index) = self.servers.iter().position(|s| s == server) {
             let mut health = self.health_status.write().await;

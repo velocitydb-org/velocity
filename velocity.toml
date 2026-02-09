@@ -1,9 +1,15 @@
 [addons.database]
-default_path = "./externals_dbs"
+default_path = "./external"
 enabled = true
 
 [addons.database.databases]
-test123 = './externals_dbs\test123'
+
+[addons.backup]
+enabled = false
+backup_path = "./backups"
+interval_minutes = 60
+backup_all = true
+target_databases = []
 
 [database]
 bloom_false_positive_rate = 0.001
@@ -35,5 +41,3 @@ max_connections = 1000
 rate_limit_per_second = 1000
 
 [users]
-admin = "$argon2id$v=19$m=19456,t=2,p=1$GDWQpkPCnz9uM5W2SBpCmw$RNLHaiBA1s5wdbQSKJ28JzwD30wohA5KoB+W8MZOxic"
-apikey = "$argon2id$v=19$m=19456,t=2,p=1$DI0aLTzckKjPM06YKrayFQ$Be7CbjSs/ZjKBvXQkdhmuNt6IBkgCIxbf8+s0utFDmI"

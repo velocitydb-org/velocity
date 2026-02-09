@@ -4,11 +4,13 @@
 
 # Default target
 help:
-	@echo "VelocityDB Build System"
-	@echo "======================"
+	@echo ""
+	@echo "Velocity Database Build System"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  build      - Build the project in release mode"
+	@echo "  build-linux - Build Linux binary using Docker"
+	@echo "  cross-linux - Cross-compile for Linux (x86_64)"
 	@echo "  test       - Run all tests"
 	@echo "  run        - Run the server with default config"
 	@echo "  clean      - Clean build artifacts"
@@ -21,8 +23,24 @@ help:
 
 # Build the project
 build:
-	@echo "Building VelocityDB..."
+	@echo "Building Velocity Database..."
 	cargo build --release
+
+# Cross-compile for Linux (requires 'cross' crate)
+cross-linux:
+	@echo "Building for Linux (x86_64)..."
+	cross build --target x86_64-unknown-linux-gnu --release
+
+# Build Linux binary using Docker
+build-linux:
+	@echo "Building Linux binary using Docker..."
+	docker build -f Dockerfile.build -t velocitydb-builder .
+	@echo "Extracting binary..."
+	@if not exist dist mkdir dist
+	docker create --name velocitydb-extract velocitydb-builder
+	docker cp velocitydb-extract:/velocity ./dist/velocity-linux-x64
+	docker rm velocitydb-extract
+	@echo "Linux binary created: dist/velocity-linux-x64"
 
 # Run tests
 test:
@@ -31,7 +49,7 @@ test:
 
 # Run the server
 run:
-	@echo "Starting VelocityDB server..."
+	@echo "Starting Velocity Database server..."
 	cargo run -- server --verbose
 
 # Clean build artifacts
@@ -47,12 +65,12 @@ docker:
 
 # Run Docker container
 docker-run:
-	@echo "Running VelocityDB in Docker..."
+	@echo "Running Velocity Database in Docker..."
 	docker-compose up -d
 
 # Stop Docker container
 docker-stop:
-	@echo "Stopping VelocityDB Docker containers..."
+	@echo "Stopping Velocity Database Docker containers..."
 	docker-compose down
 
 # Run benchmarks
@@ -77,7 +95,7 @@ docs:
 
 # Install binary
 install:
-	@echo "Installing VelocityDB..."
+	@echo "Installing Velocity Database..."
 	cargo install --path .
 
 # Create a new user

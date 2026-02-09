@@ -60,7 +60,7 @@ let pool = VelocityPool::new(
     "127.0.0.1:2005".to_string(),
     "username".to_string(),
     "password".to_string(),
-    20 // Pool size
+    20 
 );
 
 let mut connection = pool.get_connection().await?;
@@ -70,3 +70,20 @@ connection.insert("key", "value").await?;
 ## Governance and License
 
 This project is licensed under the MIT License. For further information or enterprise support, please refer to the official documentation.
+
+## Operational Observability & Reliability
+
+### Monitoring
+Velocity ships with the Studio operational console (`src/studio.rs`), which exposes `/api/analysis` for configuration and sanity checks plus `/api/stats` for aggregate `VelocityStats`. Studio will launch on the bound address (e.g., `http://127.0.0.1:2005` if you call `cargo run -- studio`) and highlights risks such as missing `velocity.toml` settings, disabled backup addons, and SSTable pressure so you can alert on those conditions from your monitoring stack.
+
+### Metrics
+Low-level instrumentation lives in `src/performance.rs`. `PerformanceMetrics` counts reads/writes, cache hits/misses, errors/timeouts, and records latency percentiles; the adaptive cache manager consults that data to tune cache sizing automatically. Enable the collector in `velocity.toml` under `[performance]` (`enable_metrics = true`, `metrics_interval = 60` seconds, `target_cache_hit_rate`) to emit snapshots, and wire those snapshots into whatever exporter you prefer.
+
+### Backup strategy
+Velocity exposes a backup addon (`crate::addon::BackupAddonConfig`) that can be enabled via `velocity.toml` under `[addons.backup]`. Configure `backup_path`, `interval_minutes`, and whether to snapshot every managed database (or a whitelist via `target_databases`). When the addon is active the manager periodically calls `backup_all_databases()` to copy each database directory into timestamped subdirectories; you can also trigger the same logic from the Studio interface or CLI commands for on-demand restores.
+
+### Upgrade story
+To upgrade, drain traffic, stop the running binary, `git pull` the latest changes, and rebuild with the Makefile or Cargo: `make release` / `cargo build --release` (or `cargo install --path .` for systems installs). The Makefile already packages `velocity.toml`, the README, and the stored binary, and there are `docker`/`docker-compose` recipes for containerized rollouts. Once the new binary is in place, restart the server against the existing data directory; WAL replay and SSTable compaction will bring nodes up to date without extra migrations.
+
+### Corruption detection
+Every WAL entry records an 8-byte checksum computed by `Velocity::calculate_checksum`; recovery (`wal::recover`) replays only entries whose stored checksum matches the recomputed hash, so transient corruptions are dropped before they affect the LSM. SSTables and Bloom filters are similarly guarded by the underlying crate (`src/lib.rs`), and the Studio analysis step warns if any configured path is missing or exhibits an unexpected SSTable count. Combine these safeguards with the backup addon so you have safe fallbacks when corruption is detected.

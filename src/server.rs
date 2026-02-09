@@ -3,42 +3,42 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use bytes::{Buf, BufMut, BytesMut};
+use crc32fast::Hasher as CrcHasher;
+use rustls::{Certificate, PrivateKey, ServerConfig as TlsServerConfig};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, Semaphore};
 use tokio::time::timeout;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
-use rustls::{ServerConfig as TlsServerConfig, Certificate, PrivateKey};
-use bytes::{Buf, BufMut, BytesMut};
-use sha2::{Sha256, Digest};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{rand_core::OsRng, SaltString};
-use crc32fast::Hasher as CrcHasher;
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
-use crate::{Velocity, VelocityConfig, VeloResult, VeloError};
 use crate::sql::SqlEngine;
+use crate::{VeloError, VeloResult, Velocity, VelocityConfig};
 
-/// Velocity Protocol Constants
-const MAGIC: u32 = 0x56454C4F; // "VELO"
+
+const MAGIC: u32 = 0x56454C4F;
 const VERSION: u8 = 0x01;
 
-/// Message Types
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MessageType {
-    // Connection
+
     Hello = 0x01,
     ServerInfo = 0x02,
     AuthRequest = 0x03,
     AuthResponse = 0x04,
     Disconnect = 0x05,
-    
-    // Commands
+
+
     Command = 0x10,
     Response = 0x11,
     Error = 0x12,
-    
-    // Control
+
+
     Ping = 0x20,
     Pong = 0x21,
     Stats = 0x22,
@@ -63,7 +63,7 @@ impl From<u8> for MessageType {
     }
 }
 
-/// Protocol Message
+
 #[derive(Debug)]
 pub struct VelocityMessage {
     pub msg_type: MessageType,
@@ -77,21 +77,21 @@ impl VelocityMessage {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut buffer = Vec::with_capacity(14 + self.payload.len());
-        
-        // Header
+
+
         buffer.put_u32_le(MAGIC);
         buffer.put_u8(VERSION);
         buffer.put_u8(self.msg_type as u8);
         buffer.put_u32_le(self.payload.len() as u32);
-        
-        // Payload
+
+
         buffer.extend_from_slice(&self.payload);
-        
-        // Checksum
+
+
         let mut hasher = CrcHasher::new();
         hasher.update(&buffer);
         buffer.put_u32_le(hasher.finalize());
-        
+
         buffer
     }
 
@@ -100,45 +100,52 @@ impl VelocityMessage {
             return Err(VeloError::InvalidOperation("Message too short".to_string()));
         }
 
-        // Save original data for checksum verification
+
         let original_data = data;
-        
-        // Parse header: [MAGIC:4][VERSION:1][TYPE:1][LENGTH:4][PAYLOAD:N][CRC:4]
+
+
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if magic != MAGIC {
-            return Err(VeloError::InvalidOperation(format!("Invalid magic: {:08x}", magic)));
+            return Err(VeloError::InvalidOperation(format!(
+                "Invalid magic: {:08x}",
+                magic
+            )));
         }
 
         let version = data[4];
         if version != VERSION {
-            return Err(VeloError::InvalidOperation(format!("Unsupported version: {}", version)));
+            return Err(VeloError::InvalidOperation(format!(
+                "Unsupported version: {}",
+                version
+            )));
         }
 
         let msg_type = MessageType::from(data[5]);
         let payload_len = u32::from_le_bytes([data[6], data[7], data[8], data[9]]) as usize;
 
         if data.len() < 10 + payload_len + 4 {
-            return Err(VeloError::InvalidOperation("Incomplete message".to_string()));
+            return Err(VeloError::InvalidOperation(
+                "Incomplete message".to_string(),
+            ));
         }
 
-        let payload = data[10..10+payload_len].to_vec();
+        let payload = data[10..10 + payload_len].to_vec();
         let checksum = u32::from_le_bytes([
-            data[10+payload_len],
-            data[10+payload_len+1],
-            data[10+payload_len+2],
-            data[10+payload_len+3],
+            data[10 + payload_len],
+            data[10 + payload_len + 1],
+            data[10 + payload_len + 2],
+            data[10 + payload_len + 3],
         ]);
 
-        // Verify checksum
+
         let mut hasher = CrcHasher::new();
-        hasher.update(&original_data[..10+payload_len]);
+        hasher.update(&original_data[..10 + payload_len]);
         let calculated_checksum = hasher.finalize();
-        
+
         if calculated_checksum != checksum {
             return Err(VeloError::CorruptedData(format!(
                 "Invalid checksum: expected {:08x}, got {:08x}",
-                calculated_checksum,
-                checksum
+                calculated_checksum, checksum
             )));
         }
 
@@ -146,7 +153,7 @@ impl VelocityMessage {
     }
 }
 
-/// Server Configuration
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind_address: SocketAddr,
@@ -156,16 +163,19 @@ pub struct ServerConfig {
     pub enable_tls: bool,
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
-    pub users: HashMap<String, String>, // username -> password_hash
+    pub users: HashMap<String, String>,
+    pub audit_log_path: String,
+    pub audit_logging: bool,
+    pub auth_ban_duration: Duration,
+    pub max_auth_failures: u32,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         let mut users = HashMap::new();
-        // Default admin user (password: "admin123")
         users.insert(
             "admin".to_string(),
-            "$argon2id$v=19$m=65536,t=3,p=4$salt$hash".to_string()
+            "$argon2id$v=19$m=19456,t=2,p=1$GDWQpkPCnz9uM5W2SBpCmw$RNLHaiBA1s5wdbQSKJ28JzwD30wohA5KoB+W8MZOxic".to_string(),
         );
 
         Self {
@@ -177,11 +187,14 @@ impl Default for ServerConfig {
             cert_path: None,
             key_path: None,
             users,
+            audit_log_path: "./velocitydb_audit.log".to_string(),
+            audit_logging: true,
+            auth_ban_duration: Duration::from_secs(300),
+            max_auth_failures: 5,
         }
     }
 }
 
-/// Client Connection State
 #[derive(Debug)]
 struct ClientState {
     authenticated: bool,
@@ -205,7 +218,7 @@ impl ClientState {
     }
 }
 
-/// Simple Rate Limiter
+
 #[derive(Debug)]
 struct RateLimiter {
     max_per_second: u32,
@@ -225,7 +238,7 @@ impl RateLimiter {
     fn try_acquire(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill);
-        
+
         if elapsed >= Duration::from_secs(1) {
             self.tokens = self.max_per_second;
             self.last_refill = now;
@@ -242,10 +255,10 @@ impl RateLimiter {
 
 use crate::addon::DatabaseManager;
 
-/// VelocityDB Server
+
 pub struct VelocityServer {
     db_manager: Arc<DatabaseManager>,
-    // sql_engine: Arc<SqlEngine>, // Removed, we create it per request
+
     config: ServerConfig,
     server_fingerprint: String,
     connection_semaphore: Arc<Semaphore>,
@@ -254,8 +267,8 @@ pub struct VelocityServer {
 
 impl VelocityServer {
     pub fn new(db_manager: Arc<DatabaseManager>, config: ServerConfig) -> VeloResult<Self> {
-        // Generate server fingerprint
-        let server_key = b"velocity_server_key_placeholder"; // In production, use actual server key
+
+        let server_key = b"velocity_server_key_placeholder";
         let mut hasher = Sha256::new();
         hasher.update(server_key);
         let server_fingerprint = format!("{:x}", hasher.finalize());
@@ -271,22 +284,25 @@ impl VelocityServer {
 
     pub async fn start(&self) -> VeloResult<()> {
         let listener = TcpListener::bind(&self.config.bind_address).await?;
-        log::info!("VelocityDB server listening on {}", self.config.bind_address);
+        log::info!(
+            "VelocityDB server listening on {}",
+            self.config.bind_address
+        );
         log::info!("Server fingerprint: {}", self.server_fingerprint);
 
         loop {
             match listener.accept().await {
                 Ok((mut stream, addr)) => {
                     log::info!("New connection from {}", addr);
-                    
-                    // Check connection limit
+
+
                     if let Ok(_permit) = self.connection_semaphore.clone().try_acquire_owned() {
                         let server = self.clone();
                         tokio::spawn(async move {
                             if let Err(e) = server.handle_connection(stream, addr).await {
                                 log::error!("Connection error for {}: {:?}", addr, e);
                             }
-                            // Permit is automatically released when dropped
+
                         });
                     } else {
                         log::warn!("Connection limit reached, rejecting {}", addr);
@@ -301,20 +317,20 @@ impl VelocityServer {
     }
 
     async fn handle_connection(&self, stream: TcpStream, addr: SocketAddr) -> VeloResult<()> {
-        // Initialize client state
+
         {
             let mut clients = self.clients.write().await;
             clients.insert(addr, ClientState::new(self.config.rate_limit_per_second));
         }
 
         let result = if self.config.enable_tls {
-            // TLS connection handling would go here
+
             self.handle_plain_connection(stream, addr).await
         } else {
             self.handle_plain_connection(stream, addr).await
         };
 
-        // Cleanup client state
+
         {
             let mut clients = self.clients.write().await;
             clients.remove(&addr);
@@ -323,52 +339,79 @@ impl VelocityServer {
         result
     }
 
-    async fn handle_plain_connection(&self, mut stream: TcpStream, addr: SocketAddr) -> VeloResult<()> {
+    async fn handle_plain_connection(
+        &self,
+        mut stream: TcpStream,
+        addr: SocketAddr,
+    ) -> VeloResult<()> {
         let mut buffer = BytesMut::with_capacity(8192);
 
         loop {
-            // Read message with timeout
+
             match timeout(self.config.connection_timeout, stream.readable()).await {
                 Ok(Ok(())) => {
-                    // Read data
+
                     match stream.try_read_buf(&mut buffer) {
-                        Ok(0) => break, // Connection closed
+                        Ok(0) => break,
                         Ok(_) => {
-                            // Process messages
+
                             while buffer.len() >= 14 {
                                 match VelocityMessage::decode(&buffer) {
                                     Ok(message) => {
                                         let message_len = 14 + message.payload.len();
                                         buffer.advance(message_len);
-                                        
+
                                         match self.handle_message(message, addr).await {
                                             Ok(Some(response)) => {
                                                 let response_data = response.encode();
-                                                if let Err(e) = stream.write_all(&response_data).await {
-                                                    log::error!("Failed to send response to {}: {:?}", addr, e);
+                                                if let Err(e) =
+                                                    stream.write_all(&response_data).await
+                                                {
+                                                    log::error!(
+                                                        "Failed to send response to {}: {:?}",
+                                                        addr,
+                                                        e
+                                                    );
                                                     return Err(VeloError::IoError(e));
                                                 }
                                             }
                                             Ok(None) => {
-                                                // No response needed
+
                                             }
                                             Err(e) => {
-                                                log::error!("Error handling message from {}: {:?}", addr, e);
-                                                // Send error response
+                                                log::error!(
+                                                    "Error handling message from {}: {:?}",
+                                                    addr,
+                                                    e
+                                                );
+
                                                 let error_msg = format!("{:?}", e);
                                                 let error_response = VelocityMessage::new(
                                                     MessageType::Error,
-                                                    error_msg.into_bytes()
+                                                    error_msg.into_bytes(),
                                                 );
-                                                let _ = stream.write_all(&error_response.encode()).await;
+                                                let _ = stream
+                                                    .write_all(&error_response.encode())
+                                                    .await;
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        log::error!("Failed to decode message from {}: {:?}", addr, e);
-                                        log::error!("Buffer length: {}, hex: {}", buffer.len(), 
-                                            buffer.iter().take(32).map(|b| format!("{:02x}", b)).collect::<String>());
-                                        break; // Need more data or invalid message
+                                        log::error!(
+                                            "Failed to decode message from {}: {:?}",
+                                            addr,
+                                            e
+                                        );
+                                        log::error!(
+                                            "Buffer length: {}, hex: {}",
+                                            buffer.len(),
+                                            buffer
+                                                .iter()
+                                                .take(32)
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect::<String>()
+                                        );
+                                        break;
                                     }
                                 }
                             }
@@ -390,15 +433,19 @@ impl VelocityServer {
         Ok(())
     }
 
-    async fn handle_message(&self, message: VelocityMessage, addr: SocketAddr) -> VeloResult<Option<VelocityMessage>> {
-        // Rate limiting
+    async fn handle_message(
+        &self,
+        message: VelocityMessage,
+        addr: SocketAddr,
+    ) -> VeloResult<Option<VelocityMessage>> {
+
         {
             let mut clients = self.clients.write().await;
             if let Some(client) = clients.get_mut(&addr) {
                 if !client.rate_limiter.try_acquire() {
                     return Ok(Some(VelocityMessage::new(
                         MessageType::Error,
-                        b"Rate limit exceeded".to_vec()
+                        b"Rate limit exceeded".to_vec(),
                     )));
                 }
                 client.last_activity = Instant::now();
@@ -406,19 +453,15 @@ impl VelocityServer {
         }
 
         match message.msg_type {
-            MessageType::Hello => {
-                Ok(Some(VelocityMessage::new(
-                    MessageType::ServerInfo,
-                    format!("VelocityDB v1.0\nFingerprint: {}", self.server_fingerprint).into_bytes()
-                )))
-            }
+            MessageType::Hello => Ok(Some(VelocityMessage::new(
+                MessageType::ServerInfo,
+                format!("VelocityDB v1.0\nFingerprint: {}", self.server_fingerprint).into_bytes(),
+            ))),
 
-            MessageType::AuthRequest => {
-                self.handle_auth(message.payload, addr).await
-            }
+            MessageType::AuthRequest => self.handle_auth(message.payload, addr).await,
 
             MessageType::Command => {
-                // Check authentication
+
                 let (authenticated, current_db) = {
                     let clients = self.clients.read().await;
                     if let Some(c) = clients.get(&addr) {
@@ -431,75 +474,81 @@ impl VelocityServer {
                 if !authenticated {
                     return Ok(Some(VelocityMessage::new(
                         MessageType::Error,
-                        b"Not authenticated".to_vec()
+                        b"Not authenticated".to_vec(),
                     )));
                 }
 
-                self.handle_command(message.payload, addr, &current_db).await
+                self.handle_command(message.payload, addr, &current_db)
+                    .await
             }
 
-            MessageType::Ping => {
-                Ok(Some(VelocityMessage::new(MessageType::Pong, Vec::new())))
-            }
+            MessageType::Ping => Ok(Some(VelocityMessage::new(MessageType::Pong, Vec::new()))),
 
-            MessageType::Stats => {
-                self.handle_stats().await
-            }
+            MessageType::Stats => self.handle_stats().await,
 
-            _ => {
-                Ok(Some(VelocityMessage::new(
-                    MessageType::Error,
-                    b"Unsupported message type".to_vec()
-                )))
-            }
+            _ => Ok(Some(VelocityMessage::new(
+                MessageType::Error,
+                b"Unsupported message type".to_vec(),
+            ))),
         }
     }
 
-    async fn handle_auth(&self, payload: Vec<u8>, addr: SocketAddr) -> VeloResult<Option<VelocityMessage>> {
-        // Parse username and password from payload
+    async fn handle_auth(
+        &self,
+        payload: Vec<u8>,
+        addr: SocketAddr,
+    ) -> VeloResult<Option<VelocityMessage>> {
+
         let auth_data = String::from_utf8_lossy(&payload);
         let parts: Vec<&str> = auth_data.split('\0').collect();
-        
+
         if parts.len() != 2 {
             return Ok(Some(VelocityMessage::new(
                 MessageType::AuthResponse,
-                b"Invalid auth format".to_vec()
+                b"Invalid auth format".to_vec(),
             )));
         }
 
         let username = parts[0];
         let password = parts[1];
 
-        // Dynamic API Key validation
+
         if username == "apikey" && password.starts_with("vdb_") {
-             if let Some(default_db) = self.db_manager.get_database("default") {
-                 let auth_key = format!("auth:keys:{}", password);
-                 if let Ok(Some(db_name_bytes)) = default_db.get(&auth_key) {
-                     let db_name = String::from_utf8_lossy(&db_name_bytes).to_string();
-                     // Authentication successful via dynamic API Key
-                     {
+            if let Some(default_db) = self.db_manager.get_database("default") {
+                let auth_key = format!("auth:keys:{}", password);
+                if let Ok(Some(db_name_bytes)) = default_db.get(&auth_key) {
+                    let db_name = String::from_utf8_lossy(&db_name_bytes).to_string();
+
+                    {
                         let mut clients = self.clients.write().await;
                         if let Some(client) = clients.get_mut(&addr) {
                             client.authenticated = true;
                             client.username = Some(username.to_string());
-                            client.current_db = db_name.clone(); // Auto-scope to the linked database
+                            client.current_db = db_name.clone();
                         }
                     }
-                    log::info!("Dynamic API Key validated. Scoped to database '{}' from {}", db_name, addr);
+                    log::info!(
+                        "Dynamic API Key validated. Scoped to database '{}' from {}",
+                        db_name,
+                        addr
+                    );
                     return Ok(Some(VelocityMessage::new(
                         MessageType::AuthResponse,
-                        b"OK".to_vec()
+                        b"OK".to_vec(),
                     )));
-                 }
-             }
+                }
+            }
         }
 
-        // Verify credentials
+
         if let Some(stored_hash) = self.config.users.get(username) {
             let argon2 = Argon2::default();
             if let Ok(parsed_hash) = PasswordHash::new(stored_hash) {
-                if argon2.verify_password(password.as_bytes(), &parsed_hash).is_ok() {
-                    // Authentication successful
+                if argon2
+                    .verify_password(password.as_bytes(), &parsed_hash)
+                    .is_ok()
+                {
+
                     {
                         let mut clients = self.clients.write().await;
                         if let Some(client) = clients.get_mut(&addr) {
@@ -511,44 +560,59 @@ impl VelocityServer {
                     log::info!("User {} authenticated from {}", username, addr);
                     return Ok(Some(VelocityMessage::new(
                         MessageType::AuthResponse,
-                        b"OK".to_vec()
+                        b"OK".to_vec(),
                     )));
                 }
             }
         }
 
-        log::warn!("Failed authentication attempt for {} from {}", username, addr);
+        log::warn!(
+            "Failed authentication attempt for {} from {}",
+            username,
+            addr
+        );
         Ok(Some(VelocityMessage::new(
             MessageType::AuthResponse,
-            b"Authentication failed".to_vec()
+            b"Authentication failed".to_vec(),
         )))
     }
 
-    async fn handle_command(&self, payload: Vec<u8>, addr: SocketAddr, current_db: &str) -> VeloResult<Option<VelocityMessage>> {
+    async fn handle_command(
+        &self,
+        payload: Vec<u8>,
+        addr: SocketAddr,
+        current_db: &str,
+    ) -> VeloResult<Option<VelocityMessage>> {
         let sql = String::from_utf8_lossy(&payload);
-        
-        // Update command count
+
+
         {
             let mut clients = self.clients.write().await;
             if let Some(client) = clients.get_mut(&addr) {
                 client.command_count += 1;
             }
         }
-        
-        // Handle Meta-Commands (CREATE DATABASE, USE)
+
+
         let sql_upper = sql.trim().to_uppercase();
         if sql_upper.starts_with("CREATE DATABASE") {
-             let parts: Vec<&str> = sql.trim().split_whitespace().collect();
-             if parts.len() >= 3 {
-                 let db_name = parts[2];
-                 match self.db_manager.create_database(db_name, None) {
-                     Ok(_) => {
-                         let msg = format!("Database '{}' created successfully", db_name);
-                         return Ok(Some(VelocityMessage::new(MessageType::Response, msg.into_bytes())));
-                     },
+            let parts: Vec<&str> = sql.trim().split_whitespace().collect();
+            if parts.len() >= 3 {
+                let db_name = parts[2];
+                match self.db_manager.create_database(db_name, None) {
+                    Ok(_) => {
+                        let msg = format!("Database '{}' created successfully", db_name);
+                        return Ok(Some(VelocityMessage::new(
+                            MessageType::Response,
+                            msg.into_bytes(),
+                        )));
+                    }
                     Err(e) => {
                         let msg = format!("Failed to create database: {}", e);
-                        return Ok(Some(VelocityMessage::new(MessageType::Error, msg.into_bytes())));
+                        return Ok(Some(VelocityMessage::new(
+                            MessageType::Error,
+                            msg.into_bytes(),
+                        )));
                     }
                 }
             }
@@ -559,11 +623,17 @@ impl VelocityServer {
                 match self.db_manager.drop_database(db_name) {
                     Ok(_) => {
                         let msg = format!("Database '{}' dropped successfully", db_name);
-                        return Ok(Some(VelocityMessage::new(MessageType::Response, msg.into_bytes())));
-                    },
+                        return Ok(Some(VelocityMessage::new(
+                            MessageType::Response,
+                            msg.into_bytes(),
+                        )));
+                    }
                     Err(e) => {
                         let msg = format!("Failed to drop database: {}", e);
-                        return Ok(Some(VelocityMessage::new(MessageType::Error, msg.into_bytes())));
+                        return Ok(Some(VelocityMessage::new(
+                            MessageType::Error,
+                            msg.into_bytes(),
+                        )));
                     }
                 }
             }
@@ -573,8 +643,12 @@ impl VelocityServer {
             return Ok(Some(VelocityMessage::new(MessageType::Response, response)));
         } else if sql_upper.starts_with("DATABASE STATS") {
             let parts: Vec<&str> = sql.trim().split_whitespace().collect();
-            let db_name = if parts.len() >= 3 { parts[2] } else { current_db };
-            
+            let db_name = if parts.len() >= 3 {
+                parts[2]
+            } else {
+                current_db
+            };
+
             if let Some(db) = self.db_manager.get_database(db_name) {
                 let s = db.stats();
                 let stats = serde_json::json!({
@@ -589,48 +663,64 @@ impl VelocityServer {
                 let response = serde_json::to_vec(&stats).unwrap();
                 return Ok(Some(VelocityMessage::new(MessageType::Response, response)));
             } else {
-                return Ok(Some(VelocityMessage::new(MessageType::Error, format!("Database '{}' not found", db_name).into_bytes())));
+                return Ok(Some(VelocityMessage::new(
+                    MessageType::Error,
+                    format!("Database '{}' not found", db_name).into_bytes(),
+                )));
             }
         } else if sql_upper.starts_with("USE") {
             let parts: Vec<&str> = sql.trim().split_whitespace().collect();
             if parts.len() >= 2 {
                 let db_name = parts[1];
                 if self.db_manager.get_database(db_name).is_some() {
-                    // Update client state
+
                     let mut clients = self.clients.write().await;
                     if let Some(client) = clients.get_mut(&addr) {
                         client.current_db = db_name.to_string();
                     }
                     let msg = format!("Switched to database '{}'", db_name);
-                    return Ok(Some(VelocityMessage::new(MessageType::Response, msg.into_bytes())));
+                    return Ok(Some(VelocityMessage::new(
+                        MessageType::Response,
+                        msg.into_bytes(),
+                    )));
                 } else {
-                    return Ok(Some(VelocityMessage::new(MessageType::Error, format!("Database '{}' not found", db_name).into_bytes())));
+                    return Ok(Some(VelocityMessage::new(
+                        MessageType::Error,
+                        format!("Database '{}' not found", db_name).into_bytes(),
+                    )));
                 }
             }
         }
-        
-        // Execute SQL on current DB
+
+
         if let Some(db) = self.db_manager.get_database(current_db) {
             let engine = SqlEngine::new(db);
             match engine.execute(&sql).await {
                 Ok(result) => {
-                    let response = serde_json::to_vec(&result).unwrap_or_else(|_| b"Serialization error".to_vec());
+                    let response = serde_json::to_vec(&result)
+                        .unwrap_or_else(|_| b"Serialization error".to_vec());
                     Ok(Some(VelocityMessage::new(MessageType::Response, response)))
                 }
                 Err(e) => {
                     let error_msg = format!("SQL Error: {:?}", e);
-                    Ok(Some(VelocityMessage::new(MessageType::Error, error_msg.into_bytes())))
+                    Ok(Some(VelocityMessage::new(
+                        MessageType::Error,
+                        error_msg.into_bytes(),
+                    )))
                 }
             }
         } else {
-            Ok(Some(VelocityMessage::new(MessageType::Error, b"Current database not found".to_vec())))
+            Ok(Some(VelocityMessage::new(
+                MessageType::Error,
+                b"Current database not found".to_vec(),
+            )))
         }
     }
 
     async fn handle_stats(&self) -> VeloResult<Option<VelocityMessage>> {
         let db_stats = self.db_manager.stats();
         let client_count = self.clients.read().await.len();
-        
+
         let stats = serde_json::json!({
             "database": {
                 "memtable_entries": db_stats.memtable_entries,
@@ -662,13 +752,16 @@ impl Clone for VelocityServer {
     }
 }
 
-/// Password hashing utility
+
 pub fn hash_password(password: &str) -> VeloResult<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
-    
+
     match argon2.hash_password(password.as_bytes(), &salt) {
         Ok(hash) => Ok(hash.to_string()),
-        Err(e) => Err(VeloError::InvalidOperation(format!("Password hashing failed: {}", e))),
+        Err(e) => Err(VeloError::InvalidOperation(format!(
+            "Password hashing failed: {}",
+            e
+        ))),
     }
 }
