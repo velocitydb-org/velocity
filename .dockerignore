@@ -1,0 +1,26 @@
+# Ignore build artifacts
+target/
+dist/
+
+# Ignore git files
+.git/
+.gitignore
+
+# Ignore IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore test and benchmark data
+test_*
+benchmark_*
+velocitydb/
+
+# Ignore documentation
+*.md
+!README.md

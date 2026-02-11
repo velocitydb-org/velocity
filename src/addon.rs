@@ -11,7 +11,11 @@ pub struct DatabaseAddonConfig {
     pub enabled: bool,
     pub default_path: PathBuf,
     #[serde(default)]
+    pub default_max_disk_size_bytes: Option<u64>,
+    #[serde(default)]
     pub databases: HashMap<String, PathBuf>,
+    #[serde(default)]
+    pub database_max_disk_size_bytes: HashMap<String, u64>,
 }
 
 impl Default for DatabaseAddonConfig {
@@ -19,7 +23,9 @@ impl Default for DatabaseAddonConfig {
         Self {
             enabled: true,
             default_path: PathBuf::from("./externals_dbs"),
+            default_max_disk_size_bytes: None,
             databases: HashMap::new(),
+            database_max_disk_size_bytes: HashMap::new(),
         }
     }
 }
@@ -47,12 +53,29 @@ impl Default for BackupAddonConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackgroundServiceAddonConfig {
+    pub enabled: bool,
+    pub pid_file: PathBuf,
+    pub watch_config: bool,
+}
+
+impl Default for BackgroundServiceAddonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pid_file: PathBuf::from("./velocity.pid"),
+            watch_config: true,
+        }
+    }
+}
 
 pub struct DatabaseManager {
     default_db: Arc<Velocity>,
     databases: RwLock<HashMap<String, Arc<Velocity>>>,
     pub db_config: RwLock<DatabaseAddonConfig>,
     backup_config: RwLock<BackupAddonConfig>,
+    background_service_config: RwLock<BackgroundServiceAddonConfig>,
     config_path: PathBuf,
 }
 
@@ -63,6 +86,7 @@ impl DatabaseManager {
             databases: RwLock::new(HashMap::new()),
             db_config: RwLock::new(DatabaseAddonConfig::default()),
             backup_config: RwLock::new(BackupAddonConfig::default()),
+            background_service_config: RwLock::new(BackgroundServiceAddonConfig::default()),
             config_path,
         };
 
@@ -83,6 +107,7 @@ impl DatabaseManager {
 
         let mut db_config = DatabaseAddonConfig::default();
         let mut backup_config = BackupAddonConfig::default();
+        let mut background_service_config = BackgroundServiceAddonConfig::default();
 
         if let Some(addons) = toml_value.get("addons") {
             if let Some(db_addon) = addons.get("database") {
@@ -94,6 +119,18 @@ impl DatabaseManager {
                 backup_config = backup_addon.clone().try_into().map_err(|e| {
                     VeloError::InvalidOperation(format!("Backup addon config error: {}", e))
                 })?;
+            }
+            if let Some(background_service_addon) = addons
+                .get("background-service")
+                .or_else(|| addons.get("background_service"))
+            {
+                background_service_config =
+                    background_service_addon.clone().try_into().map_err(|e| {
+                        VeloError::InvalidOperation(format!(
+                            "Background service addon config error: {}",
+                            e
+                        ))
+                    })?;
             }
         }
 
@@ -120,6 +157,7 @@ impl DatabaseManager {
 
         *self.db_config.write().unwrap() = db_config;
         *self.backup_config.write().unwrap() = backup_config;
+        *self.background_service_config.write().unwrap() = background_service_config;
 
         Ok(())
     }
@@ -131,12 +169,20 @@ impl DatabaseManager {
 
         let db_config = self.db_config.read().unwrap();
         let backup_config = self.backup_config.read().unwrap();
+        let background_service_config = self.background_service_config.read().unwrap();
 
         let db_addon_val = toml::Value::try_from(&*db_config)
             .map_err(|e| VeloError::InvalidOperation(format!("DB Serialization error: {}", e)))?;
         let backup_addon_val = toml::Value::try_from(&*backup_config).map_err(|e| {
             VeloError::InvalidOperation(format!("Backup Serialization error: {}", e))
         })?;
+        let background_service_addon_val = toml::Value::try_from(&*background_service_config)
+            .map_err(|e| {
+                VeloError::InvalidOperation(format!(
+                    "Background service serialization error: {}",
+                    e
+                ))
+            })?;
 
         if toml_value.get("addons").is_none() {
             toml_value.as_table_mut().unwrap().insert(
@@ -149,6 +195,10 @@ impl DatabaseManager {
             if let Some(addons_table) = addons.as_table_mut() {
                 addons_table.insert("database".to_string(), db_addon_val);
                 addons_table.insert("backup".to_string(), backup_addon_val);
+                addons_table.insert(
+                    "background-service".to_string(),
+                    background_service_addon_val,
+                );
             }
         }
 
@@ -195,6 +245,11 @@ impl DatabaseManager {
 
 
         config.databases.insert(name.to_string(), db_path.clone());
+        if let Some(limit_bytes) = config.default_max_disk_size_bytes {
+            config
+                .database_max_disk_size_bytes
+                .insert(name.to_string(), limit_bytes);
+        }
 
 
         drop(config);
@@ -233,6 +288,7 @@ impl DatabaseManager {
 
 
         config.databases.remove(name);
+        config.database_max_disk_size_bytes.remove(name);
 
 
         drop(config);
@@ -275,12 +331,52 @@ impl DatabaseManager {
         list.push("default".to_string());
         list
     }
+
+    pub fn get_database_max_disk_size_bytes(&self, name: &str) -> Option<u64> {
+        let config = self.db_config.read().unwrap();
+        config.database_max_disk_size_bytes.get(name).copied()
+    }
+
+    pub fn can_accept_write(&self, name: &str) -> VeloResult<()> {
+        let Some(limit_bytes) = self.get_database_max_disk_size_bytes(name) else {
+            return Ok(());
+        };
+
+        let Some(db) = self.get_database(name) else {
+            return Err(VeloError::KeyNotFound(format!(
+                "Database '{}' not found",
+                name
+            )));
+        };
+
+        let current_size = db.stats().total_size_bytes;
+        if current_size >= limit_bytes {
+            return Err(VeloError::InvalidOperation(format!(
+                "Database '{}' disk quota exceeded (limit: {} bytes, current: {} bytes)",
+                name, limit_bytes, current_size
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_default_database_max_disk_size_bytes(&self) -> Option<u64> {
+        self.db_config.read().unwrap().default_max_disk_size_bytes
+    }
+
+    pub fn set_default_database_max_disk_size_bytes(&self, value: Option<u64>) -> VeloResult<()> {
+        let mut config = self.db_config.write().unwrap();
+        config.default_max_disk_size_bytes = value;
+        drop(config);
+        self.save_config()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AddonKind {
     Database,
     Backup,
+    BackgroundService,
 }
 
 impl AddonKind {
@@ -288,6 +384,7 @@ impl AddonKind {
         match self {
             AddonKind::Database => "database",
             AddonKind::Backup => "backup",
+            AddonKind::BackgroundService => "background-service",
         }
     }
 }
@@ -303,6 +400,10 @@ impl DatabaseManager {
                 let mut config = self.backup_config.write().unwrap();
                 config.enabled = enabled;
             }
+            AddonKind::BackgroundService => {
+                let mut config = self.background_service_config.write().unwrap();
+                config.enabled = enabled;
+            }
         }
         self.save_config()
     }
@@ -310,11 +411,20 @@ impl DatabaseManager {
     pub fn list_addons(&self) -> Vec<(String, bool)> {
         let db_enabled = self.db_config.read().unwrap().enabled;
         let backup_enabled = self.backup_config.read().unwrap().enabled;
+        let background_service_enabled = self.background_service_config.read().unwrap().enabled;
 
         vec![
             ("database".to_string(), db_enabled),
             ("backup".to_string(), backup_enabled),
+            (
+                "background-service".to_string(),
+                background_service_enabled,
+            ),
         ]
+    }
+
+    pub fn get_background_service_config(&self) -> BackgroundServiceAddonConfig {
+        self.background_service_config.read().unwrap().clone()
     }
 
     pub fn backup_all_databases(&self) -> VeloResult<Vec<String>> {

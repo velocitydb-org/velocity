@@ -56,6 +56,11 @@ struct ToggleAddonRequest {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+struct DatabaseLimitUpdateRequest {
+    default_max_disk_size_bytes: Option<u64>,
+}
+
 pub fn analyze_system(config_path: &Path, db_manager: &DatabaseManager) -> AnalysisReport {
     let mut issues = Vec::new();
     let mut score = 100u8;
@@ -175,10 +180,40 @@ pub async fn start_studio(
                     let kind = match payload.kind.as_str() {
                         "database" => crate::addon::AddonKind::Database,
                         "backup" => crate::addon::AddonKind::Backup,
+                        "background-service" | "background_service" => crate::addon::AddonKind::BackgroundService,
                         _ => return Json(serde_json::json!({ "status": "error", "message": "Unknown addon" })),
                     };
 
                     if let Err(e) = manager.toggle_addon(kind, payload.enabled) {
+                        return Json(serde_json::json!({ "status": "error", "message": e.to_string() }));
+                    }
+
+                    Json(serde_json::json!({ "status": "ok" }))
+                }
+            }),
+        )
+        .route(
+            "/api/database/limits",
+            get({
+                let manager = db_manager.clone();
+                move || async move {
+                    Json(serde_json::json!({
+                        "default_max_disk_size_bytes": manager.get_default_database_max_disk_size_bytes()
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/database/limits",
+            post({
+                let manager = db_manager.clone();
+                move |headers: axum::http::HeaderMap, Json(payload): Json<DatabaseLimitUpdateRequest>| async move {
+                    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("");
+                    if !host.starts_with("localhost") && !host.starts_with("127.0.0.1") {
+                        return Json(serde_json::json!({ "status": "error", "message": "Access Denied" }));
+                    }
+
+                    if let Err(e) = manager.set_default_database_max_disk_size_bytes(payload.default_max_disk_size_bytes) {
                         return Json(serde_json::json!({ "status": "error", "message": e.to_string() }));
                     }
 

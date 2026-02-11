@@ -3,18 +3,22 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use env_logger;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio;
 use velocity::addon::BackupAddonConfig;
-
 use velocity::addon::DatabaseAddonConfig;
 use velocity::server::{hash_password, ServerConfig, VelocityServer};
 use velocity::{Velocity, VelocityConfig};
 
+mod config;
+mod service_runner;
+mod setup;
+use crate::config::ConfigFile;
+use crate::service_runner::{run_velocity_service, ServiceSpec};
+use crate::setup::{print_default_paths, run_setup_install, SetupInstallSpec};
+
 #[derive(Parser)]
-#[command(name = "velocitydb")]
+#[command(name = "velocity")]
 #[command(version, about = "VelocityDB - Modern, High-performance Database")]
 #[command(propagate_version = true)]
 struct Cli {
@@ -24,105 +28,98 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Database lifecycle commands")]
+    Db {
+        #[command(subcommand)]
+        subcommand: DbCommands,
+    },
 
+    #[command(about = "Administration commands")]
+    Admin {
+        #[command(subcommand)]
+        subcommand: AdminCommands,
+    },
+
+    #[command(about = "Operations and service commands")]
+    Ops {
+        #[command(subcommand)]
+        subcommand: OpsCommands,
+    },
+
+    #[command(about = "Install and system setup")]
+    Setup {
+        #[command(subcommand)]
+        subcommand: SetupCommands,
+    },
+
+    #[command(hide = true)]
     Server {
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
-
-
         #[arg(short, long, default_value = "./velocitydb")]
         data_dir: PathBuf,
-
-
         #[arg(short, long)]
         bind: Option<String>,
-
-
         #[arg(short, long)]
         verbose: bool,
     },
 
-
+    #[command(hide = true)]
     CreateUser {
-
         #[arg(short, long)]
         username: Option<String>,
-
-
         #[arg(short, long)]
         password: Option<String>,
-
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
     },
 
-
+    #[command(hide = true)]
     Init {
-
         #[arg(short, long, default_value = "velocity.toml")]
         output: PathBuf,
     },
 
-
+    #[command(hide = true)]
     Addon {
         #[command(subcommand)]
         subcommand: AddonCommands,
     },
 
-
+    #[command(hide = true)]
     Backup {
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
-
-
         #[arg(short, long, default_value = "./velocitydb")]
         data_dir: PathBuf,
     },
 
-
+    #[command(hide = true)]
     Benchmark {
-
         #[arg(short, long, default_value = "./benchmark_db")]
         data_dir: PathBuf,
-
-
         #[arg(short, long, default_value = "100000")]
         operations: usize,
-
-
         #[arg(short, long, default_value = "standard")]
         mode: String,
-
-
         #[arg(long)]
         cache_size: Option<usize>,
     },
 
-
+    #[command(hide = true)]
     Studio {
-
         #[arg(short, long, default_value = "3000")]
         port: u16,
-
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
-
-
         #[arg(short, long, default_value = "./velocitydb")]
         data_dir: PathBuf,
     },
 
-
+    #[command(hide = true)]
     Monitor {
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
-
-
         #[arg(short, long, default_value = "./velocitydb")]
         data_dir: PathBuf,
     },
@@ -130,243 +127,373 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AddonCommands {
-
     List {
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
     },
 
     Enable {
-
         name: String,
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
     },
 
     Disable {
-
         name: String,
-
         #[arg(short, long, default_value = "velocity.toml")]
         config: PathBuf,
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ConfigFile {
-    server: ServerConfigSection,
-    #[serde(default)]
-    logging: LoggingSection,
-    #[serde(default)]
-    performance: PerformanceSection,
-    #[serde(default)]
-    security: SecuritySection,
-    users: HashMap<String, String>,
-    database: DatabaseConfigSection,
-    #[serde(default)]
-    addons: AddonsSection,
+#[derive(Subcommand)]
+enum DbCommands {
+    Server {
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+        #[arg(short, long)]
+        bind: Option<String>,
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    Init {
+        #[arg(short, long, default_value = "velocity.toml")]
+        output: PathBuf,
+    },
+    Studio {
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+    },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ServerConfigSection {
-    #[serde(default = "default_bind_address")]
-    bind_address: String,
-    #[serde(default = "default_max_connections")]
-    max_connections: usize,
-    #[serde(default = "default_timeout")]
-    connection_timeout_seconds: u64,
-    #[serde(default = "default_rate_limit")]
-    rate_limit_per_second: u32,
-    #[serde(default)]
-    enable_tls: bool,
+#[derive(Subcommand)]
+enum AdminCommands {
+    CreateUser {
+        #[arg(short, long)]
+        username: Option<String>,
+        #[arg(short, long)]
+        password: Option<String>,
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+    },
+    Addon {
+        #[command(subcommand)]
+        subcommand: AddonCommands,
+    },
 }
 
-fn default_bind_address() -> String {
-    "127.0.0.1:2005".to_string()
-}
-fn default_max_connections() -> usize {
-    1000
-}
-fn default_timeout() -> u64 {
-    300
-}
-fn default_rate_limit() -> u32 {
-    1000
-}
-
-impl Default for ServerConfigSection {
-    fn default() -> Self {
-        Self {
-            bind_address: default_bind_address(),
-            max_connections: default_max_connections(),
-            connection_timeout_seconds: default_timeout(),
-            rate_limit_per_second: default_rate_limit(),
-            enable_tls: false,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct LoggingSection {
-    #[serde(default = "default_log_level")]
-    level: String,
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
+#[derive(Subcommand)]
+enum OpsCommands {
+    Backup {
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+    },
+    Monitor {
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+    },
+    Benchmark {
+        #[arg(short, long, default_value = "./benchmark_db")]
+        data_dir: PathBuf,
+        #[arg(short, long, default_value = "100000")]
+        operations: usize,
+        #[arg(short, long, default_value = "standard")]
+        mode: String,
+        #[arg(long)]
+        cache_size: Option<usize>,
+    },
+    Service {
+        #[command(subcommand)]
+        subcommand: ServiceCommands,
+    },
 }
 
-impl Default for LoggingSection {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
+#[derive(Subcommand)]
+enum ServiceCommands {
+    Run {
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+        #[arg(short, long)]
+        bind: Option<String>,
+        #[arg(short, long)]
+        verbose: bool,
+        #[arg(long)]
+        pid_file: Option<PathBuf>,
+        #[arg(long, default_value_t = true)]
+        watch_config: bool,
+    },
+    Install {
+        #[arg(short, long, default_value = "./service_templates")]
+        template_dir: PathBuf,
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+        #[arg(short, long)]
+        bind: Option<String>,
+    },
+    Uninstall {
+        #[arg(short, long, default_value = "./service_templates")]
+        template_dir: PathBuf,
+    },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct PerformanceSection {
-    #[serde(default = "default_bool_true")]
-    adaptive_cache: bool,
-    #[serde(default = "default_bool_true")]
-    enable_metrics: bool,
-    #[serde(default = "default_metrics_interval")]
-    metrics_interval: u64,
-    #[serde(default = "default_cache_hit_rate")]
-    target_cache_hit_rate: f64,
+#[derive(Subcommand)]
+enum SetupCommands {
+    Install {
+        #[arg(short, long, default_value = "velocity.toml")]
+        config: PathBuf,
+        #[arg(short, long, default_value = "./velocitydb")]
+        data_dir: PathBuf,
+        #[arg(short, long)]
+        bind: Option<String>,
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        #[arg(long)]
+        service_file: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        no_service: bool,
+    },
+    Paths,
 }
 
-fn default_bool_true() -> bool {
-    true
-}
-fn default_metrics_interval() -> u64 {
-    60
-}
-fn default_cache_hit_rate() -> f64 {
-    0.85
-}
-
-impl Default for PerformanceSection {
-    fn default() -> Self {
-        Self {
-            adaptive_cache: true,
-            enable_metrics: true,
-            metrics_interval: 60,
-            target_cache_hit_rate: 0.85,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SecuritySection {
-    #[serde(default = "default_audit_log_path")]
-    audit_log_path: String,
-    #[serde(default = "default_bool_true")]
-    audit_logging: bool,
-    #[serde(default = "default_ban_duration")]
-    auth_ban_duration: u64,
-    #[serde(default = "default_auth_failures")]
-    max_auth_failures: u32,
-}
-
-fn default_audit_log_path() -> String {
-    "./velocitydb_audit.log".to_string()
-}
-fn default_ban_duration() -> u64 {
-    300
-}
-fn default_auth_failures() -> u32 {
-    5
-}
-
-impl Default for SecuritySection {
-    fn default() -> Self {
-        Self {
-            audit_log_path: default_audit_log_path(),
-            audit_logging: true,
-            auth_ban_duration: 300,
-            max_auth_failures: 5,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DatabaseConfigSection {
-    #[serde(default = "default_memtable")]
-    max_memtable_size: usize,
-    #[serde(default = "default_cache")]
-    cache_size: usize,
-    #[serde(default = "default_bloom")]
-    bloom_false_positive_rate: f64,
-    #[serde(default = "default_compaction")]
-    compaction_threshold: usize,
-    #[serde(default)]
-    enable_compression: bool,
+enum ResolvedCommand {
+    Server {
+        config: PathBuf,
+        data_dir: PathBuf,
+        bind: Option<String>,
+        verbose: bool,
+    },
+    CreateUser {
+        username: Option<String>,
+        password: Option<String>,
+        config: PathBuf,
+    },
+    Init {
+        output: PathBuf,
+    },
+    Addon {
+        subcommand: AddonCommands,
+    },
+    Backup {
+        config: PathBuf,
+        data_dir: PathBuf,
+    },
+    Benchmark {
+        data_dir: PathBuf,
+        operations: usize,
+        mode: String,
+        cache_size: Option<usize>,
+    },
+    Studio {
+        port: u16,
+        config: PathBuf,
+        data_dir: PathBuf,
+    },
+    Monitor {
+        config: PathBuf,
+        data_dir: PathBuf,
+    },
+    ServiceRun {
+        config: PathBuf,
+        data_dir: PathBuf,
+        bind: Option<String>,
+        verbose: bool,
+        pid_file: Option<PathBuf>,
+        watch_config: bool,
+    },
+    ServiceInstall {
+        template_dir: PathBuf,
+        config: PathBuf,
+        data_dir: PathBuf,
+        bind: Option<String>,
+    },
+    ServiceUninstall {
+        template_dir: PathBuf,
+    },
+    SetupInstall {
+        config: PathBuf,
+        data_dir: PathBuf,
+        bind: Option<String>,
+        bin_dir: Option<PathBuf>,
+        service_file: Option<PathBuf>,
+        no_service: bool,
+    },
+    SetupPaths,
 }
 
-fn default_memtable() -> usize {
-    10000
-}
-fn default_cache() -> usize {
-    5000
-}
-fn default_bloom() -> f64 {
-    0.001
-}
-fn default_compaction() -> usize {
-    8
-}
-
-impl Default for DatabaseConfigSection {
-    fn default() -> Self {
-        Self {
-            max_memtable_size: default_memtable(),
-            cache_size: default_cache(),
-            bloom_false_positive_rate: default_bloom(),
-            compaction_threshold: default_compaction(),
-            enable_compression: false,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct AddonsSection {
-    database: Option<DatabaseAddonConfig>,
-    backup: Option<BackupAddonConfig>,
-}
-
-impl Default for ConfigFile {
-    fn default() -> Self {
-        let mut users = HashMap::new();
-        users.insert(
-            "admin".to_string(),
-            "$argon2id$v=19$m=19456,t=2,p=1$GDWQpkPCnz9uM5W2SBpCmw$RNLHaiBA1s5wdbQSKJ28JzwD30wohA5KoB+W8MZOxic".to_string()
-        );
-
-        Self {
-            server: ServerConfigSection::default(),
-            logging: LoggingSection::default(),
-            performance: PerformanceSection::default(),
-            security: SecuritySection::default(),
-            users,
-            database: DatabaseConfigSection::default(),
-            addons: AddonsSection::default(),
-        }
+fn resolve_command(command: Commands) -> ResolvedCommand {
+    match command {
+        Commands::Db { subcommand } => match subcommand {
+            DbCommands::Server {
+                config,
+                data_dir,
+                bind,
+                verbose,
+            } => ResolvedCommand::Server {
+                config,
+                data_dir,
+                bind,
+                verbose,
+            },
+            DbCommands::Init { output } => ResolvedCommand::Init { output },
+            DbCommands::Studio {
+                port,
+                config,
+                data_dir,
+            } => ResolvedCommand::Studio {
+                port,
+                config,
+                data_dir,
+            },
+        },
+        Commands::Admin { subcommand } => match subcommand {
+            AdminCommands::CreateUser {
+                username,
+                password,
+                config,
+            } => ResolvedCommand::CreateUser {
+                username,
+                password,
+                config,
+            },
+            AdminCommands::Addon { subcommand } => ResolvedCommand::Addon { subcommand },
+        },
+        Commands::Ops { subcommand } => match subcommand {
+            OpsCommands::Backup { config, data_dir } => ResolvedCommand::Backup { config, data_dir },
+            OpsCommands::Monitor { config, data_dir } => {
+                ResolvedCommand::Monitor { config, data_dir }
+            }
+            OpsCommands::Benchmark {
+                data_dir,
+                operations,
+                mode,
+                cache_size,
+            } => ResolvedCommand::Benchmark {
+                data_dir,
+                operations,
+                mode,
+                cache_size,
+            },
+            OpsCommands::Service { subcommand } => match subcommand {
+                ServiceCommands::Run {
+                    config,
+                    data_dir,
+                    bind,
+                    verbose,
+                    pid_file,
+                    watch_config,
+                } => ResolvedCommand::ServiceRun {
+                    config,
+                    data_dir,
+                    bind,
+                    verbose,
+                    pid_file,
+                    watch_config,
+                },
+                ServiceCommands::Install {
+                    template_dir,
+                    config,
+                    data_dir,
+                    bind,
+                } => ResolvedCommand::ServiceInstall {
+                    template_dir,
+                    config,
+                    data_dir,
+                    bind,
+                },
+                ServiceCommands::Uninstall { template_dir } => {
+                    ResolvedCommand::ServiceUninstall { template_dir }
+                }
+            },
+        },
+        Commands::Setup { subcommand } => match subcommand {
+            SetupCommands::Install {
+                config,
+                data_dir,
+                bind,
+                bin_dir,
+                service_file,
+                no_service,
+            } => ResolvedCommand::SetupInstall {
+                config,
+                data_dir,
+                bind,
+                bin_dir,
+                service_file,
+                no_service,
+            },
+            SetupCommands::Paths => ResolvedCommand::SetupPaths,
+        },
+        Commands::Server {
+            config,
+            data_dir,
+            bind,
+            verbose,
+        } => ResolvedCommand::Server {
+            config,
+            data_dir,
+            bind,
+            verbose,
+        },
+        Commands::CreateUser {
+            username,
+            password,
+            config,
+        } => ResolvedCommand::CreateUser {
+            username,
+            password,
+            config,
+        },
+        Commands::Init { output } => ResolvedCommand::Init { output },
+        Commands::Addon { subcommand } => ResolvedCommand::Addon { subcommand },
+        Commands::Backup { config, data_dir } => ResolvedCommand::Backup { config, data_dir },
+        Commands::Benchmark {
+            data_dir,
+            operations,
+            mode,
+            cache_size,
+        } => ResolvedCommand::Benchmark {
+            data_dir,
+            operations,
+            mode,
+            cache_size,
+        },
+        Commands::Studio {
+            port,
+            config,
+            data_dir,
+        } => ResolvedCommand::Studio {
+            port,
+            config,
+            data_dir,
+        },
+        Commands::Monitor { config, data_dir } => ResolvedCommand::Monitor { config, data_dir },
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let command = resolve_command(cli.command);
 
-    match cli.command {
-        Commands::Init { output } => {
+    match command {
+        ResolvedCommand::Init { output } => {
             handle_init(&output).await?;
         }
 
-        Commands::Server {
+        ResolvedCommand::Server {
             config,
             data_dir,
             bind,
@@ -386,6 +513,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::write(&config, toml_string)?;
                 default_cfg
             };
+
+            let background_service_cfg = file_config
+                .addons
+                .background_service
+                .clone()
+                .unwrap_or_default();
+            if background_service_cfg.enabled {
+                println!(
+                    "{} background-service addon enabled; launching service mode.",
+                    "[SERVICE]".green()
+                );
+                run_velocity_service(ServiceSpec {
+                    config_path: config,
+                    data_dir,
+                    bind,
+                    verbose,
+                    pid_file: Some(background_service_cfg.pid_file),
+                    watch_config: background_service_cfg.watch_config,
+                })
+                .await?;
+                return Ok(());
+            }
 
 
             let log_level = if verbose {
@@ -526,7 +675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             server.start().await?;
         }
 
-        Commands::CreateUser {
+        ResolvedCommand::CreateUser {
             username,
             password,
             config,
@@ -576,7 +725,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Addon { subcommand } => match subcommand {
+        ResolvedCommand::Addon { subcommand } => match subcommand {
             AddonCommands::List { config } => {
                 if !config.exists() {
                     return Err(format!("Config file {:?} not found!", config).into());
@@ -607,9 +756,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     "Disabled".red()
                 };
+                let background_service_status = if toml_config
+                    .addons
+                    .background_service
+                    .as_ref()
+                    .map(|a| a.enabled)
+                    .unwrap_or(true)
+                {
+                    "Enabled".green()
+                } else {
+                    "Disabled".red()
+                };
 
                 println!("  - {}: {}", "database".bold(), db_status);
                 println!("  - {}: {}", "backup".bold(), backup_status);
+                println!(
+                    "  - {}: {}",
+                    "background-service".bold(),
+                    background_service_status
+                );
             }
             AddonCommands::Enable { name, config } => {
                 if !config.exists() {
@@ -628,6 +793,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut addon = toml_config.addons.backup.unwrap_or_default();
                         addon.enabled = true;
                         toml_config.addons.backup = Some(addon);
+                    }
+                    "background-service" | "background_service" => {
+                        let mut addon = toml_config.addons.background_service.unwrap_or_default();
+                        addon.enabled = true;
+                        toml_config.addons.background_service = Some(addon);
                     }
                     _ => return Err(format!("Unknown addon: {}", name).into()),
                 }
@@ -660,6 +830,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             toml_config.addons.backup = Some(addon);
                         }
                     }
+                    "background-service" | "background_service" => {
+                        let mut addon = toml_config.addons.background_service.unwrap_or_default();
+                        addon.enabled = false;
+                        toml_config.addons.background_service = Some(addon);
+                    }
                     _ => return Err(format!("Unknown addon: {}", name).into()),
                 }
 
@@ -673,7 +848,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
 
-        Commands::Backup { config, data_dir } => {
+        ResolvedCommand::Backup { config, data_dir } => {
             let db_config = VelocityConfig::default();
             let db = Velocity::open_with_config(&data_dir, db_config)?;
             let manager = velocity::addon::DatabaseManager::new(db, config);
@@ -694,7 +869,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Monitor { config, data_dir } => {
+        ResolvedCommand::Monitor { config, data_dir } => {
             if !config.exists() {
                 return Err(format!("Config file {:?} not found!", config).into());
             }
@@ -818,7 +993,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Benchmark {
+        ResolvedCommand::Benchmark {
             data_dir,
             operations,
             mode,
@@ -827,7 +1002,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_benchmark(&data_dir, operations, mode, cache_size).await?;
         }
 
-        Commands::Studio {
+        ResolvedCommand::Studio {
             port,
             config,
             data_dir,
@@ -840,9 +1015,137 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let addr = format!("127.0.0.1:{}", port).parse()?;
             velocity::studio::start_studio(addr, manager, config).await?;
         }
+        ResolvedCommand::ServiceRun {
+            config,
+            data_dir,
+            bind,
+            verbose,
+            pid_file,
+            watch_config,
+        } => {
+            run_velocity_service(ServiceSpec {
+                config_path: config,
+                data_dir,
+                bind,
+                verbose,
+                pid_file,
+                watch_config,
+            })
+            .await?;
+        }
+        ResolvedCommand::ServiceInstall {
+            template_dir,
+            config,
+            data_dir,
+            bind,
+        } => {
+            install_service_templates(&template_dir, &config, &data_dir, bind.as_ref())?;
+        }
+        ResolvedCommand::ServiceUninstall { template_dir } => {
+            uninstall_service_templates(&template_dir)?;
+        }
+        ResolvedCommand::SetupInstall {
+            config,
+            data_dir,
+            bind,
+            bin_dir,
+            service_file,
+            no_service,
+        } => {
+            run_setup_install(SetupInstallSpec {
+                config,
+                data_dir,
+                bind,
+                bin_dir,
+                service_file,
+                with_service: !no_service,
+            })?;
+        }
+        ResolvedCommand::SetupPaths => {
+            print_default_paths();
+        }
     }
 
     Ok(())
+}
+
+fn install_service_templates(
+    dir: &Path,
+    config: &Path,
+    data_dir: &Path,
+    bind: Option<&String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dir)?;
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.display().to_string();
+    let unit = generate_systemd_unit(&exe_str, config, data_dir, bind);
+    let script = generate_windows_script(&exe_str, config, data_dir, bind);
+    std::fs::write(dir.join("velocity.service"), unit)?;
+    std::fs::write(dir.join("install-velocity.ps1"), script)?;
+    println!(
+        "{} Service templates written to {:?}",
+        "[SUCCESS]".green(),
+        dir
+    );
+    Ok(())
+}
+
+fn uninstall_service_templates(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+        println!("{} Removed templates under {:?}", "[WARN]".yellow(), dir);
+    } else {
+        println!("{} No templates found at {:?}", "[WARN]".yellow(), dir);
+    }
+    Ok(())
+}
+
+fn generate_systemd_unit(
+    exe_path: &str,
+    config: &Path,
+    data_dir: &Path,
+    bind: Option<&String>,
+) -> String {
+    let bind_arg = bind
+        .map(|b| format!(" --bind {}", b))
+        .unwrap_or_default();
+
+    format!(
+        "[Unit]\n\
+Description=VelocityDB service\n\
+After=network.target\n\
+\n\
+[Service]\n\
+Type=simple\n\
+ExecStart={} ops service run --config {} --data-dir {}{} --verbose\n\
+Restart=on-failure\n\
+\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        exe_path,
+        config.display(),
+        data_dir.display(),
+        bind_arg
+    )
+}
+
+fn generate_windows_script(
+    exe_path: &str,
+    config: &Path,
+    data_dir: &Path,
+    bind: Option<&String>,
+) -> String {
+    let bind_arg = bind
+        .map(|b| format!(" --bind {}", b))
+        .unwrap_or_default();
+
+    format!(
+        "param(\n    [string]$ServiceName = \"VelocityDB\",\n    [string]$DisplayName = \"VelocityDB Service\"\n)\n\n$binPath = \"{} ops service run --config {} --data-dir {}{} --verbose\"\n\nsc.exe create $ServiceName binPath= \"$binPath\" DisplayName= \"$DisplayName\" start= auto\nsc.exe description $ServiceName \"VelocityDB background service\"\n",
+        exe_path,
+        config.display(),
+        data_dir.display(),
+        bind_arg
+    )
 }
 
 async fn handle_init(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1151,3 +1454,4 @@ async fn run_benchmark(
 
     Ok(())
 }
+

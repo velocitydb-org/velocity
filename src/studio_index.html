@@ -436,6 +436,16 @@
                     <div style="color: var(--text-dim); font-size: 0.8rem;">Loading modules...</div>
                 </div>
             </div>
+
+            <div class="card">
+                <div class="card-label">DATABASE_DEFAULT_LIMIT</div>
+                <div style="display: flex; flex-direction: column; gap: 10px;">
+                    <label for="db-limit-input" style="font-size: 0.75rem; color: var(--text-dim);">Max Disk Size (bytes, empty = unlimited)</label>
+                    <input id="db-limit-input" type="number" min="1" style="background: #0f1113; border: 1px solid var(--border-color); color: var(--text-main); padding: 10px; font-family: var(--font-mono); font-size: 0.8rem;" />
+                    <button class="btn-action" onclick="saveDbLimit()">Save Limit</button>
+                    <div id="db-limit-status" style="font-size: 0.75rem; color: var(--text-dim);"></div>
+                </div>
+            </div>
         </div>
 
         <div id="doc-view">
@@ -572,9 +582,11 @@ String val = client.get("key");</pre>
             loadStats();
             loadAnalysis();
             loadAddons();
+            loadDbLimit();
             setInterval(loadStats, 2000);
             setInterval(loadAnalysis, 5000);
             setInterval(loadAddons, 5000);
+            setInterval(loadDbLimit, 8000);
         }
 
         async function loadAddons() {
@@ -651,6 +663,48 @@ String val = client.get("key");</pre>
                 document.getElementById('stat-ss').textContent = "14";
                 document.getElementById('stat-size').textContent = "128.4 MB";
                 document.getElementById('stat-cache').textContent = "99.2 %";
+            }
+        }
+
+        async function loadDbLimit() {
+            try {
+                const res = await fetch('/api/database/limits');
+                const data = await res.json();
+                const input = document.getElementById('db-limit-input');
+                const status = document.getElementById('db-limit-status');
+                if (data.default_max_disk_size_bytes) {
+                    input.value = String(data.default_max_disk_size_bytes);
+                    status.textContent = 'Current: ' + data.default_max_disk_size_bytes + ' bytes';
+                } else {
+                    input.value = '';
+                    status.textContent = 'Current: Unlimited';
+                }
+            } catch (e) {
+                document.getElementById('db-limit-status').textContent = 'Failed to load limit';
+            }
+        }
+
+        async function saveDbLimit() {
+            const input = document.getElementById('db-limit-input');
+            const status = document.getElementById('db-limit-status');
+            const raw = input.value.trim();
+            const payload = {
+                default_max_disk_size_bytes: raw === '' ? null : Number(raw)
+            };
+
+            try {
+                const res = await fetch('/api/database/limits', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.status !== 'ok') {
+                    throw new Error(data.message || 'Failed');
+                }
+                status.textContent = raw === '' ? 'Saved: Unlimited' : 'Saved: ' + raw + ' bytes';
+            } catch (e) {
+                status.textContent = 'Failed to save limit';
             }
         }
     </script>

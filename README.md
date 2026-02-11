@@ -43,10 +43,10 @@ The server can be initialized via the command-line interface:
 
 ```bash
 # Initialize storage engine
-cargo run -- server --bind 127.0.0.1:2005 --data-dir ./data
+cargo run --bin velocity -- db server --bind 127.0.0.1:2005 --data-dir ./data
 
 # Provision administrative user
-cargo run -- create-user --username admin --password [secure_password]
+cargo run --bin velocity -- admin create-user --username admin --password [secure_password]
 ```
 
 ### SDK Integration
@@ -87,3 +87,27 @@ To upgrade, drain traffic, stop the running binary, `git pull` the latest change
 
 ### Corruption detection
 Every WAL entry records an 8-byte checksum computed by `Velocity::calculate_checksum`; recovery (`wal::recover`) replays only entries whose stored checksum matches the recomputed hash, so transient corruptions are dropped before they affect the LSM. SSTables and Bloom filters are similarly guarded by the underlying crate (`src/lib.rs`), and the Studio analysis step warns if any configured path is missing or exhibits an unexpected SSTable count. Combine these safeguards with the backup addon so you have safe fallbacks when corruption is detected.
+## Background service & desktop tray controls
+
+Velocity can run as a background service on Linux and Windows:
+
+1. `velocity ops service run` launches the database loop the same way `velocity db server` does, but it also writes `velocity.pid` next to the working directory so external tooling can monitor the service.
+2. `velocity ops service install` populates `service_templates/velocity.service` and `service_templates/install-velocity.ps1` with ready-to-use systemd and Windows Service installation recipes that point back to the current executable, config, and data directory. `velocity ops service uninstall` removes those templates if you need to reset the configuration.
+3. `velocity setup install` installs binaries to platform defaults (`Program Files\\Velocity\\bin` on Windows, `/opt/velocity/bin` on Linux) and writes default service installers (`/etc/systemd/system/velocity.service` on Linux).
+
+For desktops you now have small tray helpers that sit in the notification area (hidden icons on Windows) and call `velocity ops service run` on demand:
+
+- **Windows tray helper**: run `scripts/tray/tray-windows.ps1` from PowerShell�the script uses `System.Windows.Forms.NotifyIcon`, shows a context menu with Start/Stop/Open Studio/Exit, and leaves a `velocity` icon inside the hidden icon area so you can keep the daemon running while your main session is minimized.
+- **Linux tray helper**: `scripts/tray/tray-linux.py` (requires `pystray` and `pillow`) spawns a `pystray` icon with the same actions and fires up the service via `subprocess`. Install the Python dependencies with `pip install pystray pillow` and run the script when you want a lightweight desktop controller on GNOME/KDE.
+
+Both helpers default to `velocity ops service run --config ./velocity.toml --data-dir ./velocitydb --verbose`, but you can pass `VelocityExe`, `Config`, and `DataDir` parameters if your layout differs.
+
+## Combined Linux + Windows builds
+
+`build-all.bat` builds both platforms in one go. On a machine with Rust and `cross` installed just run:
+
+```
+build-all.bat
+```
+
+It first produces the local Windows release (`target/release/velocity`) and then invokes `cross build --target x86_64-unknown-linux-gnu --release`. The resulting binaries land in `dist/velocity-windows.exe` and `dist/velocity-linux-x64`, so you can ship both artifacts from a single invocation. Update the script if you target additional architectures or want to call Docker/musl directly.

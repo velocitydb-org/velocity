@@ -641,6 +641,47 @@ impl VelocityServer {
             let list = self.db_manager.list_databases();
             let response = serde_json::to_vec(&list).unwrap();
             return Ok(Some(VelocityMessage::new(MessageType::Response, response)));
+        } else if sql_upper == "SHOW DATABASE DEFAULT MAX DISK SIZE" {
+            let response = serde_json::to_vec(&serde_json::json!({
+                "default_max_disk_size_bytes": self.db_manager.get_default_database_max_disk_size_bytes()
+            }))
+            .unwrap();
+            return Ok(Some(VelocityMessage::new(MessageType::Response, response)));
+        } else if sql_upper.starts_with("SET DATABASE DEFAULT MAX DISK SIZE") {
+            let parts: Vec<&str> = sql.trim().split_whitespace().collect();
+            if parts.len() >= 7 {
+                let raw_value = parts[6].trim_end_matches(';');
+                let normalized = raw_value.to_uppercase();
+                let parsed = if normalized == "UNLIMITED"
+                    || normalized == "NONE"
+                    || normalized == "NULL"
+                {
+                    None
+                } else {
+                    Some(raw_value.parse::<u64>().map_err(|_| {
+                        VeloError::InvalidOperation(
+                            "Disk limit must be a positive integer (bytes) or UNLIMITED"
+                                .to_string(),
+                        )
+                    })?)
+                };
+
+                self.db_manager
+                    .set_default_database_max_disk_size_bytes(parsed)?;
+
+                let msg = if let Some(limit) = parsed {
+                    format!(
+                        "Default database disk limit set to {} bytes for new databases",
+                        limit
+                    )
+                } else {
+                    "Default database disk limit removed (unlimited)".to_string()
+                };
+                return Ok(Some(VelocityMessage::new(
+                    MessageType::Response,
+                    msg.into_bytes(),
+                )));
+            }
         } else if sql_upper.starts_with("DATABASE STATS") {
             let parts: Vec<&str> = sql.trim().split_whitespace().collect();
             let db_name = if parts.len() >= 3 {
@@ -694,6 +735,14 @@ impl VelocityServer {
 
 
         if let Some(db) = self.db_manager.get_database(current_db) {
+            if Self::is_write_sql(&sql) {
+                if let Err(e) = self.db_manager.can_accept_write(current_db) {
+                    return Ok(Some(VelocityMessage::new(
+                        MessageType::Error,
+                        format!("SQL Error: {}", e).into_bytes(),
+                    )));
+                }
+            }
             let engine = SqlEngine::new(db);
             match engine.execute(&sql).await {
                 Ok(result) => {
@@ -715,6 +764,11 @@ impl VelocityServer {
                 b"Current database not found".to_vec(),
             )))
         }
+    }
+
+    fn is_write_sql(sql: &str) -> bool {
+        let upper = sql.trim_start().to_uppercase();
+        upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE")
     }
 
     async fn handle_stats(&self) -> VeloResult<Option<VelocityMessage>> {

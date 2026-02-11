@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "velocitydb")]
-#[command(version, about = "VelocityDB - Comprehensive Stress Test Benchmark")]
+#[command(
+    version,
+    about = "Velocity Database - Comprehensive Stress Test Benchmark"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -12,21 +15,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /
     Stress {
-        /
         #[arg(short, long, default_value = "./stress_test_db")]
         data_dir: PathBuf,
 
-        /
         #[arg(long, default_value = "30")]
         sstable_count: usize,
 
-        /
         #[arg(short, long, default_value = "50000")]
         operations: usize,
 
-        /
         #[arg(long)]
         no_bloom: bool,
     },
@@ -60,10 +58,14 @@ async fn run_stress_test(
     use velocity::{Velocity, VelocityConfig};
 
     println!("{}", "=".repeat(70).bold());
-    println!("{}", "  VelocityDB COMPREHENSIVE STRESS TEST".bold().cyan());
+    println!(
+        "{}",
+        "  Velocity Database COMPREHENSIVE STRESS TEST"
+            .bold()
+            .cyan()
+    );
     println!("{}", "=".repeat(70).bold());
     println!();
-
 
     if data_dir.exists() {
         std::fs::remove_dir_all(data_dir)?;
@@ -107,7 +109,6 @@ async fn run_stress_test(
     );
     println!();
 
-
     println!(
         "{} Building {} SSTables...",
         "[PHASE 1]".green().bold(),
@@ -123,7 +124,6 @@ async fn run_stress_test(
         let key = format!("key_{:08}", i);
         let value = format!("value_data_{:08}_padding_to_make_realistic_size", i).into_bytes();
         db.put(key, value)?;
-
 
         if (i + 1) % records_per_sstable == 0 {
             db.flush()?;
@@ -160,7 +160,6 @@ async fn run_stress_test(
     println!("  Build Time: {:?}", build_duration);
     println!();
 
-
     println!(
         "{} Random Read Test (p50/p95/p99 latency)...",
         "[PHASE 2]".green().bold()
@@ -180,7 +179,6 @@ async fn run_stress_test(
         read_latencies.push(op_start.elapsed());
     }
     let read_duration = read_start.elapsed();
-
 
     read_latencies.sort();
     let p50 = read_latencies[read_latencies.len() * 50 / 100];
@@ -209,7 +207,6 @@ async fn run_stress_test(
     );
     println!("    max: {:.2} μs", max.as_micros());
     println!();
-
 
     println!(
         "{} Mixed Workload Test (70% Read / 30% Write)...",
@@ -240,7 +237,6 @@ async fn run_stress_test(
         }
     }
     let mixed_duration = mixed_start.elapsed();
-
 
     mixed_read_latencies.sort();
     mixed_write_latencies.sort();
@@ -273,7 +269,6 @@ async fn run_stress_test(
         mixed_w_p99.as_micros().to_string().yellow()
     );
     println!();
-
 
     let final_stats = db.stats();
     println!("{}", "=".repeat(70).bold());
